@@ -348,7 +348,7 @@ function safeDirectiveSegments(text: string): Unstable_DirectiveSegment[] {
  * Renders text containing Hermes directives (`@file:...`, `@image:...`) as
  * inline chips. Embedded MEDIA images render below as a thumbnail row.
  */
-export function DirectiveContent({ text }: { text: string }) {
+export function DirectiveContent({ text, transcriptActions }: { text: string; transcriptActions?: boolean }) {
   const { cleanedText, images } = useMemo(() => safeEmbeddedImages(text ?? ''), [text])
   const segments = useMemo(() => safeDirectiveSegments(cleanedText), [cleanedText])
 
@@ -380,7 +380,12 @@ export function DirectiveContent({ text }: { text: string }) {
       {(imageSegments.length > 0 || images.length > 0) && (
         <span className="mt-2 flex flex-wrap gap-2" data-slot="aui_embedded-images">
           {imageSegments.map((segment, index) => (
-            <DirectiveImage id={segment.id} key={`img-ref-${index}-${segment.id}`} label={segment.label} />
+            <DirectiveImage
+              id={segment.id}
+              key={`img-ref-${index}-${segment.id}`}
+              label={segment.label}
+              transcriptActions={transcriptActions}
+            />
           ))}
           {images.map((src, index) => (
             <ZoomableImage
@@ -390,6 +395,7 @@ export function DirectiveContent({ text }: { text: string }) {
               key={`img-${index}`}
               slot="aui_embedded-image"
               src={src}
+              transcriptActions={transcriptActions}
             />
           ))}
         </span>
@@ -406,7 +412,7 @@ export const DirectiveText: TextMessagePartComponent = ({ text }: TextMessagePar
 /** Image refs render as a thumbnail rather than a chip — matches how persisted
  * messages render after the backend embeds the data URL, so the UX is stable
  * across initial send and refresh. */
-const DirectiveImage: FC<{ id: string; label: string }> = ({ id, label }) => {
+const DirectiveImage: FC<{ id: string; label: string; transcriptActions?: boolean }> = ({ id, label, transcriptActions }) => {
   // `blob:` joins the direct-URL set: the object URL is already renderer-local
   // (the whole point of the OS-drop preview path), so painting it is free of
   // the IPC read the path branch would issue.
@@ -480,6 +486,7 @@ const DirectiveImage: FC<{ id: string; label: string }> = ({ id, label }) => {
       draggable={false}
       slot="aui_directive-image"
       src={src}
+      transcriptActions={transcriptActions}
       zoomSrc={zoomSrc ?? undefined}
     />
   )

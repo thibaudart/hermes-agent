@@ -117,9 +117,10 @@ function splitInlineCode(text: string): InlineNode[] {
 interface UserMessageTextProps {
   text: string
   className?: string
+  transcriptActions?: boolean
 }
 
-export const UserMessageText: FC<UserMessageTextProps> = ({ className, text }) => {
+export const UserMessageText: FC<UserMessageTextProps> = ({ className, text, transcriptActions }) => {
   const top = useMemo(() => splitFences(text), [text])
 
   return (
@@ -139,7 +140,7 @@ export const UserMessageText: FC<UserMessageTextProps> = ({ className, text }) =
 
         return (
           <Fragment key={`inline-${segmentIndex}`}>
-            <InlineSegmentView text={segment.text} />
+            <InlineSegmentView text={segment.text} transcriptActions={transcriptActions} />
           </Fragment>
         )
       })}
@@ -147,7 +148,7 @@ export const UserMessageText: FC<UserMessageTextProps> = ({ className, text }) =
   )
 }
 
-const InlineSegmentView: FC<{ text: string }> = ({ text }) => {
+const InlineSegmentView: FC<Pick<UserMessageTextProps, 'text' | 'transcriptActions'>> = ({ text, transcriptActions }) => {
   const nodes = useMemo(() => splitInlineCode(text), [text])
   const textDirection = useForcedTextDirection()
 
@@ -169,7 +170,7 @@ const InlineSegmentView: FC<{ text: string }> = ({ text }) => {
           // Pass plain-text bits through DirectiveContent so @file:/@url: chips
           // still render. DirectiveContent already preserves whitespace.
           <Fragment key={`text-${nodeIndex}`}>
-            <DirectiveContent text={node.text} />
+            <DirectiveContent text={node.text} transcriptActions={transcriptActions} />
           </Fragment>
         )
       )}

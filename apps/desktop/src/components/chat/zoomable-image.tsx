@@ -1,21 +1,40 @@
 'use client'
 
 import { useStore } from '@nanostores/react'
-import { type ComponentProps, useEffect, useRef } from 'react'
+import { type ComponentProps, type MouseEvent, useEffect, useId, useLayoutEffect, useRef } from 'react'
 
+import { composerDraftCaptureForSurface } from '@/app/chat/composer/plugin-image-attachment'
+import { useComposerSurfaceId } from '@/app/chat/composer/scope'
+import { isElementInHiddenPane, usePaneVisible } from '@/components/pane-shell/pane-visibility'
+import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { useZoomPan } from '@/components/ui/use-zoom-pan'
+import { useContributions } from '@/contrib/react/use-contributions'
 import { useImageDownload } from '@/hooks/use-image-download'
 import { useI18n } from '@/i18n'
 import { Download, ZoomIn, ZoomOut } from '@/lib/icons'
+import {
+  IMAGE_LIGHTBOX_ACTIONS_AREA,
+  type ImageLightboxActionContribution,
+  isReadableLightboxImage,
+  readLightboxImage
+} from '@/lib/image-lightbox-actions'
 import { cn } from '@/lib/utils'
-import { $transcriptLightbox, closeTranscriptLightbox, openTranscriptLightbox } from '@/store/transcript-lightbox'
+import {
+  $transcriptLightbox,
+  closeTranscriptLightbox,
+  openTranscriptLightbox,
+  releaseTranscriptLightbox,
+  type TranscriptLightboxSelection
+} from '@/store/transcript-lightbox'
 
 export interface ZoomableImageProps extends ComponentProps<'img'> {
   /** Classes for the click target around the image, e.g. a definite height inside a reserved frame. */
   buttonClassName?: string
   containerClassName?: string
   slot?: string
+  /** Only opt in from a chat transcript, never a private image viewer. */
+  transcriptActions?: boolean
   /** Full-resolution source for the lightbox and download. When set, the inline
    * `<img>` keeps its bounded `src` (avoiding heavy inline paints) while the
    * zoom view and Save action use the original — so a click-to-zoom shows real
@@ -31,6 +50,49 @@ export interface ImageActionCopy {
   resetZoom: string
 }
 
+export function useImageLightbox(src: string, alt: string | undefined, transcriptActions = false) {
+  const imageId = useId()
+  const surfaceId = useComposerSurfaceId()
+  const visible = usePaneVisible()
+  const selection = useStore($transcriptLightbox)
+  const matches = visible && selection?.surfaceId === surfaceId && selection.src === src && selection.alt === alt
+
+  useLayoutEffect(() => {
+    if (!selection || $transcriptLightbox.get() !== selection) {
+      return
+    }
+
+    if (selection.imageId === imageId && !matches) {
+      closeTranscriptLightbox(imageId)
+    }
+
+    // Streaming may replace a leaf. Reclaim its preview, but don't mint a
+    // plugin capability without a new click on the actual source occurrence.
+    if (matches && selection.imageId === null) {
+      openTranscriptLightbox({ ...selection, imageId })
+    }
+  }, [imageId, matches, selection])
+
+  useLayoutEffect(() => () => releaseTranscriptLightbox(imageId), [imageId])
+
+  const open = matches && selection.imageId === imageId
+
+  return {
+    open,
+    openFrom: (event: MouseEvent<HTMLButtonElement>) =>
+      openTranscriptLightbox({
+        alt,
+        captureDraft: transcriptActions ? composerDraftCaptureForSurface(surfaceId) : undefined,
+        imageId,
+        opener: event.currentTarget,
+        src,
+        surfaceId
+      }),
+    close: () => closeTranscriptLightbox(imageId),
+    selection: open && selection.captureDraft ? selection : undefined
+  }
+}
+
 export function ZoomableImage({
   buttonClassName,
   className,
@@ -39,6 +101,7 @@ export function ZoomableImage({
   zoomSrc,
   alt,
   slot,
+  transcriptActions,
   ...props
 }: ZoomableImageProps) {
   const { t } = useI18n()
@@ -47,14 +110,7 @@ export function ZoomableImage({
   // thumbnail (`src`) stays the cheap paint.
   const fullSrc = zoomSrc || src || ''
   const { download, saving } = useImageDownload(fullSrc)
-  // The open flag lives in a store keyed by source identity, not local state:
-  // transcript rows (and the markdown leaves inside them) remount routinely
-  // while a turn streams — the render-budget slice can drop the row, and the
-  // streaming re-parse re-mounts AST leaves — which used to close a
-  // user-opened lightbox with no gesture (#123018). A remounted row reads the
-  // same store and re-presents its own open dialog.
-  const openSrc = useStore($transcriptLightbox)
-  const lightboxOpen = openSrc !== null && openSrc === fullSrc
+  const lightbox = useImageLightbox(fullSrc, alt, transcriptActions)
   const canOpen = Boolean(src)
 
   return (
@@ -70,7 +126,7 @@ export function ZoomableImage({
             buttonClassName
           )}
           disabled={!canOpen}
-          onClick={() => canOpen && openTranscriptLightbox(fullSrc)}
+          onClick={lightbox.openFrom}
           type="button"
         >
           <img alt={alt ?? ''} className={className} src={src} {...props} />
@@ -84,9 +140,10 @@ export function ZoomableImage({
           alt={alt}
           copy={copy}
           onClick={download}
-          onOpenChange={open => (open ? openTranscriptLightbox(fullSrc) : closeTranscriptLightbox(fullSrc))}
-          open={lightboxOpen}
+          onOpenChange={open => !open && lightbox.close()}
+          open={lightbox.open}
           saving={saving}
+          selection={lightbox.selection}
           src={fullSrc}
         />
       )}
@@ -101,6 +158,7 @@ export function ImageLightbox({
   onOpenChange,
   open,
   saving,
+  selection,
   src
 }: {
   alt?: string
@@ -109,9 +167,19 @@ export function ImageLightbox({
   onOpenChange: (open: boolean) => void
   open: boolean
   saving: boolean
+  selection?: TranscriptLightboxSelection
   src: string
 }) {
   const openerRef = useRef<HTMLElement | null>(null)
+  const pendingAction = useRef<(() => void) | null>(null)
+  const currentSrc = useRef<string | null>(null)
+  useLayoutEffect(() => {
+    currentSrc.current = src
+
+    return () => {
+      currentSrc.current = null
+    }
+  }, [src])
 
   // Shared pan/zoom mechanics (wheel zoom, drag pan, pinch) come from
   // useZoomPan — the same hook the diagram/artifact viewer uses, so there is a
@@ -137,6 +205,37 @@ export function ImageLightbox({
 
   const cursor = scale > 1 ? (panning ? 'grabbing' : 'grab') : 'zoom-out'
 
+  const selectAction = (action: ImageLightboxActionContribution['onSelect'], id: string) => {
+    const opener = selection?.opener
+    const isCurrent = () => currentSrc.current === src && opener?.isConnected && !isElementInHiddenPane(opener)
+
+    if (pendingAction.current || $transcriptLightbox.get() !== selection || !isCurrent()) {
+      return
+    }
+
+    const draft = selection?.captureDraft?.() ?? null
+
+    pendingAction.current = () => {
+      let image: Promise<Blob | null> | undefined
+
+      const readImage = async () => {
+        if (!isCurrent()) {
+          return null
+        }
+
+        const blob = await (image ??= readLightboxImage(src))
+
+        return isCurrent() ? blob : null
+      }
+
+      void Promise.resolve()
+        .then(() => isCurrent() && action({ alt: alt ?? '', draft, readImage }))
+        .catch(() => console.warn(`[${IMAGE_LIGHTBOX_ACTIONS_AREA}] ${id} onSelect() failed`))
+    }
+
+    onOpenChange(false)
+  }
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
@@ -144,7 +243,7 @@ export function ImageLightbox({
         chrome={
           open && (
             <div
-              className="fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-1 rounded-full border border-border/70 bg-background/85 p-1 shadow-lg backdrop-blur"
+              className="fixed bottom-4 left-1/2 z-50 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-1 rounded-full border border-border/70 bg-background/85 p-1 shadow-lg backdrop-blur"
               onClick={event => event.stopPropagation()}
               onPointerDown={event => event.stopPropagation()}
             >
@@ -174,6 +273,7 @@ export function ImageLightbox({
               >
                 <ZoomIn className="size-4" />
               </button>
+              {selection && isReadableLightboxImage(src) && <LightboxActions onSelect={selectAction} />}
             </div>
           )
         }
@@ -197,6 +297,12 @@ export function ImageLightbox({
           if (opener?.isConnected) {
             opener.focus({ preventScroll: true })
           }
+
+          // Radix has removed the content; let its focus-scope teardown finish
+          // before a plugin opens another modal.
+          const action = pendingAction.current
+          pendingAction.current = null
+          action?.()
         }}
         onOpenAutoFocus={() => {
           const opener = globalThis.document.activeElement
@@ -228,6 +334,35 @@ export function ImageLightbox({
       </DialogContent>
     </Dialog>
   )
+}
+
+function LightboxActions({
+  onSelect
+}: {
+  onSelect: (action: ImageLightboxActionContribution['onSelect'], id: string) => void
+}) {
+  const contributions = useContributions(IMAGE_LIGHTBOX_ACTIONS_AREA)
+
+  return contributions.map(({ data, id }) => {
+    const action = data as ImageLightboxActionContribution | undefined
+
+    if (typeof action?.label !== 'string' || !action.label.trim() || typeof action.onSelect !== 'function') {
+      return null
+    }
+
+    return (
+      <Button
+        className="max-w-48 rounded-full"
+        key={id}
+        onClick={() => onSelect(action.onSelect, id)}
+        size="sm"
+        type="button"
+        variant="ghost"
+      >
+        <span className="truncate">{action.label}</span>
+      </Button>
+    )
+  })
 }
 
 export function ImageActionButton({

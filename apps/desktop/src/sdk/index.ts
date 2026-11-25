@@ -1844,6 +1844,12 @@ export { triggerHaptic as haptic } from '@/lib/haptics'
 export type { HermesOpenTarget } from '@/lib/hermes-open-target'
 /** The app's lucide icon set (RefreshCw, LayoutDashboard, Activity, …). */
 export * as icons from '@/lib/icons'
+/** User-triggered actions on a selected chat image, with no raw source URL. */
+export {
+  IMAGE_LIGHTBOX_ACTIONS_AREA,
+  type ImageLightboxActionContext,
+  type ImageLightboxActionContribution
+} from '@/lib/image-lightbox-actions'
 /** IME-aware Enter: true only for a real submit Enter, never a CJK composition
  *  commit (`isComposing` or the legacy keyCode 229). Use it on every plugin
  *  text field whose bare Enter performs an action. */

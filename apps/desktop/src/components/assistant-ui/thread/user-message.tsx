@@ -559,7 +559,7 @@ export const UserMessage: FC<{
           clicking to edit can't grow the bubble by a sub-pixel and reflow the
           turn 1px. */}
       <div className="min-h-[1.25rem]" ref={clampInnerRef}>
-        <UserMessageText className="wrap-anywhere" text={messageText} />
+        <UserMessageText className="wrap-anywhere" text={messageText} transcriptActions />
       </div>
     </div>
   ) : (
@@ -568,7 +568,7 @@ export const UserMessage: FC<{
     // empty above a detached row. Images keep their thumbnail row below.
     chipOnlyTurn && (
       <div className="flex min-h-[1.25rem] flex-wrap gap-1">
-        <DirectiveContent text={attachmentRefs.join(' ')} />
+        <DirectiveContent text={attachmentRefs.join(' ')} transcriptActions />
       </div>
     )
   )
@@ -584,7 +584,7 @@ export const UserMessage: FC<{
           // render as thumbnails, file refs as chips; no border.
           attachmentRefs.length > 0 && !chipOnlyTurn ? (
             <div className="mb-2 flex flex-wrap gap-1">
-              <DirectiveContent text={attachmentRefs.join(' ')} />
+              <DirectiveContent text={attachmentRefs.join(' ')} transcriptActions />
             </div>
           ) : null
         }

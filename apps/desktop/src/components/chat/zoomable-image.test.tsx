@@ -1,15 +1,32 @@
+import { Blob as NodeBlob } from 'node:buffer'
+import { URL as NodeURL } from 'node:url'
+
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { registerFloatingComposer } from '@/app/chat/composer/floating-target'
+import { attachImageToComposerDraft, registerComposerImageRecipient } from '@/app/chat/composer/plugin-image-attachment'
+import { ComposerSurfaceProvider } from '@/app/chat/composer/scope'
+import { UserMessageText } from '@/components/assistant-ui/thread/user-message-text'
+import { registry } from '@/contrib/registry'
 import { I18nProvider } from '@/i18n/context'
+import {
+  IMAGE_LIGHTBOX_ACTIONS_AREA,
+  type ImageLightboxActionContext,
+  readLightboxImage
+} from '@/lib/image-lightbox-actions'
 import { resetTranscriptLightbox } from '@/store/transcript-lightbox'
 
+import { GeneratedImage } from './generated-image-result'
 import { ZoomableImage } from './zoomable-image'
+
+vi.mock('./image-generation-placeholder', () => ({ DiffusionCanvas: () => null }))
 
 const SRC = 'https://example.com/long-detail.png'
 const ALT = 'long detail image'
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQi1gAAAGuARekSxIOAAAAAElFTkSuQmCC'
+const DATA_IMAGE = `data:image/png;base64,${PNG}`
 
 async function renderImage() {
   let result!: ReturnType<typeof render>
@@ -56,6 +73,30 @@ function percentageText(): string {
   return node.textContent ?? ''
 }
 
+it('reads a live image Blob URL but rejects it once revoked', async () => {
+  const src = NodeURL.createObjectURL(
+    new NodeBlob([Uint8Array.from(atob(PNG), char => char.charCodeAt(0))], { type: 'image/png' })
+  )
+
+  try {
+    expect(await readLightboxImage(src)).toMatchObject({ type: 'image/png' })
+  } finally {
+    NodeURL.revokeObjectURL(src)
+  }
+
+  await expect(readLightboxImage(src)).resolves.toBeNull()
+})
+
+it('bounds the decoded byte count of image Blob URLs', async () => {
+  const src = NodeURL.createObjectURL(new NodeBlob([new Uint8Array(16 * 1024 * 1024 + 1)], { type: 'image/png' }))
+
+  try {
+    await expect(readLightboxImage(src)).resolves.toBeNull()
+  } finally {
+    NodeURL.revokeObjectURL(src)
+  }
+})
+
 describe('ZoomableImage lightbox', () => {
   let unregisterComposer: (() => void) | undefined
 
@@ -72,6 +113,217 @@ describe('ZoomableImage lightbox', () => {
 
     expect(screen.getByRole('dialog')).toBeTruthy()
     expect(lightboxImg()).toBeTruthy()
+  })
+
+  it('hands only the selected full-resolution image to a plugin after closing the viewer', async () => {
+    const read = vi.spyOn(globalThis, 'fetch')
+
+    const onSelect = vi.fn(async ({ alt, readImage }: { alt: string; readImage: () => Promise<Blob | null> }) => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(alt).toBe('selected image')
+      const blob = await readImage()
+      expect(blob?.type).toBe('image/png')
+      expect(await blob?.arrayBuffer()).toEqual(Uint8Array.from(atob(PNG), char => char.charCodeAt(0)).buffer)
+
+      return blob
+    })
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Edit image', onSelect }
+    })
+
+    try {
+      await renderWithI18n(<ZoomableImage alt="selected image" src={THUMB} transcriptActions zoomSrc={DATA_IMAGE} />)
+      fireEvent.click(screen.getByAltText('selected image'))
+      expect(read).not.toHaveBeenCalled()
+      expect(onSelect).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Edit image' }))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
+      await expect(onSelect.mock.results[0]?.value).resolves.toBeInstanceOf(Blob)
+    } finally {
+      unregister()
+      read.mockRestore()
+    }
+  })
+
+  it.each([false, true])('targets the originating surface (composer replaced: %s)', async replaced => {
+    const mainAttach = vi.fn(async () => true)
+    const sourceAttach = vi.fn(async () => true)
+
+    const register = (surfaceId: string, attach: typeof sourceAttach) =>
+      registerComposerImageRecipient({
+        attach,
+        capture: () => () => true,
+        sessionKey: surfaceId,
+        surfaceId,
+        target: 'main'
+      })
+
+    const removeMain = register('other', mainAttach)
+    const removeSource = register('source', sourceAttach)
+    let removeReplacement: (() => void) | undefined
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ close: vi.fn(), height: 1, width: 1 }))
+    )
+
+    const onSelect = vi.fn(async ({ draft, readImage }: ImageLightboxActionContext) => {
+      const blob = await readImage()
+      expect(blob).toBeInstanceOf(Blob)
+
+      return draft && blob ? attachImageToComposerDraft(draft, blob) : null
+    })
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Send edit', onSelect }
+    })
+
+    try {
+      await renderWithI18n(
+        <>
+          <div data-composer-surface-id="other" data-composer-target="main">
+            <ComposerSurfaceProvider value="other">
+              <ZoomableImage alt="other image" src={DATA_IMAGE} transcriptActions />
+            </ComposerSurfaceProvider>
+          </div>
+          <div data-composer-surface-id="source" data-composer-target="main">
+            <ComposerSurfaceProvider value="source">
+              <ZoomableImage alt="origin image" src={DATA_IMAGE} transcriptActions />
+            </ComposerSurfaceProvider>
+          </div>
+        </>
+      )
+      fireEvent.click(screen.getByAltText('origin image'))
+      expect(lightboxImg().alt).toBe('origin image')
+
+      if (replaced) {
+        removeSource()
+        removeReplacement = register('source', mainAttach)
+      }
+
+      fireEvent.click(screen.getByRole('button', { name: 'Send edit' }))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
+      await expect(onSelect.mock.results[0]?.value).resolves.toBe(replaced ? null : true)
+      expect(mainAttach).not.toHaveBeenCalled()
+      expect(sourceAttach).toHaveBeenCalledTimes(replaced ? 0 : 1)
+    } finally {
+      unregister()
+      removeMain()
+      removeSource()
+      removeReplacement?.()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('offers actions on the generated-image transcript card', async () => {
+    const onSelect = vi.fn()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Edit generated image', onSelect }
+    })
+
+    try {
+      await renderWithI18n(
+        <ComposerSurfaceProvider value="source">
+          <GeneratedImage result={{ image: DATA_IMAGE, success: true }} />
+        </ComposerSurfaceProvider>
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Edit generated image' }))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
+      expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ alt: 'Generated image', draft: null }))
+    } finally {
+      cleanup()
+      unregister()
+    }
+  })
+
+  it('offers actions on embedded images in sent user messages', async () => {
+    const onSelect = vi.fn()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Edit sent image', onSelect }
+    })
+
+    try {
+      await renderWithI18n(<UserMessageText text={`Image: ${DATA_IMAGE}`} transcriptActions />)
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Edit sent image' }))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
+    } finally {
+      cleanup()
+      unregister()
+    }
+  })
+
+  it.each(['file:///private/image.png', 'https://example.test/image.png?token=opaque', 'data:text/plain,not-an-image'])(
+    'keeps unsupported sources in the built-in viewer without offering plugin reads (%s)',
+    async src => {
+      const onSelect = vi.fn()
+
+      const unregister = registry.register({
+        area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+        id: 'test',
+        data: { label: 'Read image', onSelect }
+      })
+
+      const read = vi.spyOn(globalThis, 'fetch')
+
+      try {
+        await renderWithI18n(<ZoomableImage alt="unsupported source" src={src} transcriptActions />)
+        fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+        const dialog = within(screen.getByRole('dialog'))
+        expect(dialog.getByRole('button', { name: 'Download image' })).toBeTruthy()
+        expect(dialog.queryByRole('button', { name: 'Read image' })).toBeNull()
+        expect(onSelect).not.toHaveBeenCalled()
+        expect(read).not.toHaveBeenCalled()
+      } finally {
+        cleanup()
+        unregister()
+        read.mockRestore()
+      }
+    }
+  )
+
+  it('requires a new selection after the open source is replaced', async () => {
+    const original = (src: string) => <ZoomableImage alt="changing image" src={src} transcriptActions />
+    const onSelect = vi.fn()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Read source', onSelect }
+    })
+
+    try {
+      const { rerender } = await renderWithI18n(original(DATA_IMAGE))
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      expect(screen.getByRole('button', { name: 'Read source' })).toBeTruthy()
+      rerender(
+        <I18nProvider configClient={null} initialLocale="en">
+          {original(THUMB)}
+        </I18nProvider>
+      )
+      expect(screen.queryByRole('dialog')).toBeNull()
+      rerender(
+        <I18nProvider configClient={null} initialLocale="en">
+          {original(DATA_IMAGE)}
+        </I18nProvider>
+      )
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(onSelect).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+      unregister()
+    }
   })
 
   it.each(['Escape', 'image click'] as const)(

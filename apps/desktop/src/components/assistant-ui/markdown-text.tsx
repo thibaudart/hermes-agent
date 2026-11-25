@@ -174,9 +174,9 @@ function OpenMediaButton({ kind, path }: { kind: 'audio' | 'video'; path: string
   )
 }
 
-function MediaAttachment({ path }: { path: string }) {
+function MediaAttachment({ path, transcriptActions }: { path: string; transcriptActions?: boolean }) {
   return mediaKind(path) === 'image' ? (
-    <MarkdownImage alt={mediaName(path)} src={path} />
+    <MarkdownImage alt={mediaName(path)} src={path} transcriptActions={transcriptActions} />
   ) : (
     <MediaPlaybackAttachment path={path} />
   )
@@ -306,7 +306,13 @@ function PreviewOnlyMarkdownLink({ children, className, href }: ComponentProps<'
   return <ExternalLink className={cn('wrap-anywhere', className)} href={target.href}>{children}</ExternalLink>
 }
 
-function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a'>) {
+function MarkdownLink({
+  children,
+  className,
+  href,
+  transcriptActions,
+  ...props
+}: ComponentProps<'a'> & { transcriptActions?: boolean }) {
   const mediaPath = mediaPathFromMarkdownHref(href)
 
   if (mediaPath) {
@@ -325,7 +331,7 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
       isMarkdownDocumentPath(mediaPath) || mediaKind(mediaPath) === 'file' ? (
         <PreviewAttachment target={mediaPath} />
       ) : (
-        <MediaAttachment path={mediaPath} />
+        <MediaAttachment path={mediaPath} transcriptActions={transcriptActions} />
       )
 
     // The plugin that owns the tool which produced this file may draw it instead.
@@ -364,7 +370,7 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
           {mediaKind(fileHref) === 'file' ? (
             <PreviewAttachment target={fileHref} />
           ) : (
-            <MediaAttachment path={fileHref} />
+            <MediaAttachment path={fileHref} transcriptActions={transcriptActions} />
           )}
         </ToolMediaSlot>
       )
@@ -420,7 +426,9 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
 // This is split from the image path because that path is built on hooks: a
 // conditional return inside it would have to sit after every hook call, which
 // would still fire an image resolve for media we never render as an image.
-export function MarkdownImage(props: ComponentProps<'img'>) {
+type MarkdownImageProps = ComponentProps<'img'> & { transcriptActions?: boolean }
+
+export function MarkdownImage(props: MarkdownImageProps) {
   const rawSrc = typeof props.src === 'string' ? props.src : ''
   const kind = rawSrc ? mediaKind(rawSrc) : 'file'
 
@@ -447,8 +455,9 @@ function MarkdownImageContent({
   onLoad,
   onError,
   style,
+  transcriptActions,
   ...props
-}: ComponentProps<'img'>) {
+}: MarkdownImageProps) {
   const rawSrc = typeof src === 'string' ? src : ''
   const image = useMediaImage(rawSrc, COLD_IMAGE_RATIO, validImageDimensions(width, height))
   const { open, openFailed } = useOpenMediaFile(rawSrc)
@@ -510,6 +519,7 @@ function MarkdownImageContent({
           }}
           src={image.src}
           style={style}
+          transcriptActions={transcriptActions}
         />
       ) : (
         <span className={cn('block overflow-hidden text-sm text-muted-foreground', framed && 'absolute inset-0')}>
@@ -534,6 +544,7 @@ interface MarkdownTextSurfaceProps {
   disableArtifacts?: boolean
   /** Foreign history must not load images or mount live transcript directives. */
   previewOnly?: boolean
+  transcriptActions?: boolean
   /** Re-render the direct text nodes of paragraph-level containers (p / li /
    *  td) — a transcript surface styles its own inline tokens (a Bot Mode room's
    *  routed @mentions) without owning the Markdown pipeline. Nested inline
@@ -719,7 +730,8 @@ function MarkdownTextSurface({
   disableArtifacts,
   previewOnly,
   scratchpad,
-  textDirection
+  textDirection,
+  transcriptActions
 }: MarkdownTextSurfaceProps) {
   // The whole surface renders the DEFERRED part. StreamdownTextPrimitive runs
   // `preprocess` (full-text regex passes + the remend boundary scan, O(N)) on
@@ -769,7 +781,9 @@ function MarkdownTextSurface({
               {decorateText ? decorateText(children) : children}
             </MarkdownParagraph>
           ),
-        a: previewOnly ? PreviewOnlyMarkdownLink : MarkdownLink,
+        a: previewOnly
+          ? PreviewOnlyMarkdownLink
+          : (props: ComponentProps<'a'>) => <MarkdownLink {...props} transcriptActions={transcriptActions && !scratchpad} />,
         // Inline code must not vote when an ancestor resolves `dir="auto"`
         // (HTML's algorithm skips descendants that carry their own dir),
         // mirroring the CSS isolate that already keeps it out of the
@@ -838,7 +852,9 @@ function MarkdownTextSurface({
             {decorateText ? decorateText(children) : children}
           </td>
         ),
-        img: previewOnly ? ({ alt }: ComponentProps<'img'>) => <span>{alt}</span> : MarkdownImage,
+        img: previewOnly
+          ? ({ alt }: ComponentProps<'img'>) => <span>{alt}</span>
+          : (props: ComponentProps<'img'>) => <MarkdownImage {...props} transcriptActions={transcriptActions && !scratchpad} />,
         SyntaxHighlighter: (props: SyntaxHighlighterProps) => (
           <MarkdownCodeBlock
             {...props}
@@ -847,7 +863,7 @@ function MarkdownTextSurface({
           />
         )
       }) as StreamdownTextComponents,
-    [boxDir, decorateText, disableArtifacts, previewOnly, scratchpad]
+    [boxDir, decorateText, disableArtifacts, previewOnly, scratchpad, transcriptActions]
   )
 
   if (text.length > MAX_MARKDOWN_CHARS) {
@@ -956,7 +972,7 @@ export function MarkdownTextContent({ isRunning, text, ...surfaceProps }: Markdo
 const MarkdownTextImpl = () => {
   const textDirection = useForcedTextDirection()
 
-  return <MarkdownTextSurface textDirection={textDirection} />
+  return <MarkdownTextSurface textDirection={textDirection} transcriptActions />
 }
 
 export const MarkdownText = memo(MarkdownTextImpl)

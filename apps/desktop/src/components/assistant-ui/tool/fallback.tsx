@@ -694,7 +694,7 @@ function ToolEntry({ part }: ToolEntryProps) {
           )}
           {view.imageUrl && (
             <div className="max-w-72 overflow-hidden rounded-[0.25rem] border border-(--ui-stroke-tertiary)">
-              <MarkdownImage alt={copy.outputAlt} src={view.imageUrl} />
+              <MarkdownImage alt={copy.outputAlt} src={view.imageUrl} transcriptActions />
             </div>
           )}
           {hasSearchHits && view.searchHits && (

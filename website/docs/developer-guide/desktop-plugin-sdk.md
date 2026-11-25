@@ -1129,6 +1129,46 @@ Migration for **rss-reader** (#115972): replace the stubbed `/preview` → 501 �
 chain with `<SandboxedFrame src={article.url} title={article.title} />` inside
 the workspace page; drop the leftover `.rss-browser-frame-host webview` CSS.
 
+### Chat image lightbox actions {#chat-image-lightbox-actions}
+
+Register an `ImageLightboxActionContribution` in `IMAGE_LIGHTBOX_ACTIONS_AREA`
+to add a labeled button next to the zoom controls for a viewed chat image:
+
+```javascript
+import { IMAGE_LIGHTBOX_ACTIONS_AREA } from '@hermes/plugin-sdk'
+
+ctx.register({
+  id: 'edit-image',
+  area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+  data: {
+    label: 'Edit image',
+    async onSelect({ alt, draft, readImage }) {
+      const image = await readImage()
+      if (image) openMyEditor({ alt, draft, image })
+    }
+  }
+})
+```
+
+- `onSelect` runs only after the user activates the button and the native
+  viewer has closed and released focus. The plugin owns any editor or dialog
+  that opens next.
+- `readImage()` takes no arguments and reads only that selected image at the
+  viewer's resolution. Call it in `onSelect` and keep the returned `Blob` if
+  needed. Only resolved `data:image/…` and live `blob:` sources are eligible;
+  there is no raw URL, external refetch, or file-read capability. It returns
+  `null` if the image is stale, unreadable, non-image, or over 16 MiB.
+- `alt` is the image's alt text (or `''`). Treat it and the image bytes as
+  untrusted content.
+- `draft` is the opaque `ComposerDraftAddress` for the originating chat
+  surface, or `null` if that draft is unavailable. Pass it to
+  [`host.composer.attachImage`](#composer-image-attachments) if the user asks
+  to attach an edited PNG. If the handle is absent or attaching returns
+  `false`, don't fall back to whichever composer has focus.
+
+Composer attachment previews, settings, and other non-transcript viewers do
+not surface these actions.
+
 ### Transcript directives — inline components the model addresses
 
 `TRANSCRIPT_DIRECTIVE_AREA` makes the transcript itself a contribution area.

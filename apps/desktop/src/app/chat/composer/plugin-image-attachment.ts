@@ -1,7 +1,7 @@
 import { BROWSER_UPLOAD_MAX_BYTES } from '@/lib/browser-uploads'
 import { isFreshDraftScope } from '@/store/composer'
 
-import { type ComposerTarget, getVisibleComposerSurfaceId } from './focus'
+import { composerSurfaceIsVisible, type ComposerTarget, getVisibleComposerSurfaceId } from './focus'
 import type { ChatBarProps } from './types'
 
 // The opaque handle is renderer-local and can only be minted by captureDraft.
@@ -43,6 +43,28 @@ export function captureComposerDraft(target: ComposerTarget, expected: 'new' | s
   const recipient = surfaceId ? recipients.get(surfaceId) : undefined
 
   if (!recipient || recipient.target !== target || !matchesDraft(recipient, expected)) {
+    return null
+  }
+
+  return captureRecipient(recipient)
+}
+
+/** Bind the recipient at viewer open, but resolve its draft only on action.
+ * A new draft can mount on the same surface while the viewer is open. */
+export function composerDraftCaptureForSurface(surfaceId: string | null): () => ComposerDraftAddress | null {
+  const recipient = surfaceId === null ? undefined : recipients.get(surfaceId)
+
+  return () => (recipient ? captureRecipient(recipient) : null)
+}
+
+function recipientIsVisible(recipient: ImageRecipient): boolean {
+  return (
+    recipients.get(recipient.surfaceId) === recipient && composerSurfaceIsVisible(recipient.target, recipient.surfaceId)
+  )
+}
+
+function captureRecipient(recipient: ImageRecipient): ComposerDraftAddress | null {
+  if (!recipientIsVisible(recipient)) {
     return null
   }
 
@@ -101,10 +123,7 @@ export async function attachImageToComposerDraft(
 
   const { recipient } = entry
 
-  const isCurrent = () =>
-    recipients.get(recipient.surfaceId) === recipient &&
-    getVisibleComposerSurfaceId(recipient.target) === recipient.surfaceId &&
-    entry.isCurrent()
+  const isCurrent = () => recipientIsVisible(recipient) && entry.isCurrent()
 
   if (!isCurrent()) {
     return false

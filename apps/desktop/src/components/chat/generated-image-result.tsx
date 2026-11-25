@@ -6,7 +6,7 @@ import { type FC, useState } from 'react'
 import { useSessionView } from '@/app/chat/session-view'
 import { resolveSessionOwner } from '@/app/session/hooks/use-session-actions/utils'
 import { DiffusionCanvas } from '@/components/chat/image-generation-placeholder'
-import { ImageActionButton, ImageLightbox } from '@/components/chat/zoomable-image'
+import { ImageActionButton, ImageLightbox, useImageLightbox } from '@/components/chat/zoomable-image'
 import { useImageDownload } from '@/hooks/use-image-download'
 import { useMediaImage } from '@/hooks/use-media-image'
 import { useI18n } from '@/i18n'
@@ -73,7 +73,7 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
 
   const { src, loaded, failed } = media
   const [canvasGone, setCanvasGone] = useState<string | null>(null)
-  const [lightboxOpen, setLightboxOpen] = useState<string | null>(null)
+  const lightbox = useImageLightbox(src, 'Generated image', true)
   const { download, saving } = useImageDownload(src)
   const view = useSessionView()
   const storedSessionId = useStore(view.$storedId)
@@ -140,7 +140,7 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
           <button
             aria-label={copy.openImage}
             className="absolute inset-0 block size-full cursor-zoom-in"
-            onClick={() => setLightboxOpen(media.key)}
+            onClick={lightbox.openFrom}
             type="button"
           >
             <img
@@ -165,9 +165,10 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
           alt="Generated image"
           copy={copy}
           onClick={download}
-          onOpenChange={open => setLightboxOpen(open ? media.key : null)}
-          open={lightboxOpen === media.key}
+          onOpenChange={open => !open && lightbox.close()}
+          open={lightbox.open}
           saving={saving}
+          selection={lightbox.selection}
           src={src}
         />
       )}

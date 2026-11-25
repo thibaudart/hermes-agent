@@ -206,7 +206,7 @@ export const getVisibleComposerSurfaceId = (target: ComposerTarget): string | nu
   return surface?.dataset.composerSurfaceId || null
 }
 
-const composerSurfaceIsVisible = (target: ComposerTarget, surfaceId: string): boolean => {
+export const composerSurfaceIsVisible = (target: ComposerTarget, surfaceId: string): boolean => {
   if (typeof document === 'undefined') {
     return false
   }
