@@ -7,7 +7,12 @@ export interface ImageLightboxActionContext {
   readonly alt: string
   /** The originating composer draft, if still available when the action was selected. */
   readonly draft: ComposerDraftAddress | null
-  /** Lazily read the selected image at full resolution; null if unavailable. */
+  /** Lazily read the selected full-resolution `data:image/…` or live `blob:`
+   * source (including bytes already materialized by the renderer from remote
+   * media). Never reads a direct remote URL or file path. Returns null for a
+   * stale, missing, unreadable, or ineligible source. The host checks the
+   * declared image MIME type and encoded byte size (up to 16 MiB), not whether
+   * the bytes decode. Treat them as untrusted and handle decoding safely. */
   readImage(): Promise<Blob | null>
 }
 

@@ -2,6 +2,7 @@ import { Blob as NodeBlob } from 'node:buffer'
 import { URL as NodeURL } from 'node:url'
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { atom } from 'nanostores'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -16,7 +17,8 @@ import {
   type ImageLightboxActionContext,
   readLightboxImage
 } from '@/lib/image-lightbox-actions'
-import { resetTranscriptLightbox } from '@/store/transcript-lightbox'
+import { $activeSessionId } from '@/store/session'
+import { registerTranscriptLightboxScope, resetTranscriptLightbox } from '@/store/transcript-lightbox'
 
 import { GeneratedImage } from './generated-image-result'
 import { ZoomableImage } from './zoomable-image'
@@ -145,6 +147,295 @@ describe('ZoomableImage lightbox', () => {
     } finally {
       unregister()
       read.mockRestore()
+    }
+  })
+
+  it.each([false, true])('does not dispatch a disposed action (same ID re-registered: %s)', async replace => {
+    const onSelect = vi.fn()
+
+    const register = () =>
+      registry.register({
+        area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+        id: 'test',
+        data: { label: 'Edit image', onSelect }
+      })
+
+    const unregister = register()
+    let unregisterReplacement: (() => void) | undefined
+
+    try {
+      await renderWithI18n(<ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />)
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Edit image' }))
+        unregister()
+
+        if (replace) {
+          unregisterReplacement = register()
+        }
+      })
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(onSelect).not.toHaveBeenCalled()
+    } finally {
+      unregisterReplacement?.()
+
+      if (!replace) {unregister()}
+    }
+  })
+
+  it('revokes a disposed action’s lazy read, including one already in flight', async () => {
+    let finishRead!: (response: Response) => void
+
+    const fetchImage = vi.spyOn(globalThis, 'fetch').mockReturnValue(
+      new Promise(resolve => {
+        finishRead = resolve
+      })
+    )
+
+    const onSelect = vi.fn<(context: ImageLightboxActionContext) => void>()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Edit image', onSelect }
+    })
+
+    try {
+      await renderWithI18n(<ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />)
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Edit image' }))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
+      const { readImage } = onSelect.mock.calls[0]![0]
+      const pending = readImage()
+      await waitFor(() => expect(fetchImage).toHaveBeenCalledOnce())
+      unregister()
+      finishRead(new Response('declared image bytes', { headers: { 'content-type': 'image/png' } }))
+
+      await expect(pending).resolves.toBeNull()
+      await expect(readImage()).resolves.toBeNull()
+      expect(fetchImage).toHaveBeenCalledOnce()
+    } finally {
+      unregister()
+      fetchImage.mockRestore()
+    }
+  })
+
+  it.each([false, true])('restores the selected occurrence before handoff (image re-resolves: %s)', async resolving => {
+    const leaveSession = registerTranscriptLightboxScope('source')
+
+    const onSelect = vi.fn(({ readImage }: ImageLightboxActionContext) => ({
+      dialog: screen.queryByRole('dialog'),
+      focus: globalThis.document.activeElement,
+      image: readImage()
+    }))
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Edit image', onSelect }
+    })
+
+    const ui = (key: string | null) => (
+      <I18nProvider configClient={null} initialLocale="en">
+        <ComposerSurfaceProvider value="source">
+          <div data-chat-surface="" data-composer-surface-id="source">
+            <div data-message-id="reply">
+              <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />
+              {key && <ZoomableImage alt="selected image" key={key} src={DATA_IMAGE} transcriptActions />}
+            </div>
+          </div>
+        </ComposerSurfaceProvider>
+      </I18nProvider>
+    )
+
+    try {
+      const { rerender } = render(ui('before'))
+      const original = screen.getAllByRole('button', { name: 'Open image' })[1]!
+      original.focus()
+      fireEvent.click(original)
+      fireEvent.click(screen.getByRole('button', { name: 'Edit image' }))
+
+      if (resolving) {
+        rerender(ui(null))
+        // Local media may briefly return to its ordinary loading placeholder.
+        await act(async () => {
+          await new Promise(resolve => setTimeout(resolve, 0))
+        })
+      }
+
+      rerender(ui('after'))
+      const replacement = screen.getAllByRole('button', { name: 'Open image' })[1]!
+      expect(replacement).not.toBe(original)
+
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce(), { timeout: 1_000 })
+      const result = onSelect.mock.results[0]!.value
+      expect(result.dialog).toBeNull()
+      expect(result.focus).toBe(replacement)
+      await expect(result.image).resolves.toMatchObject({ type: 'image/png' })
+    } finally {
+      leaveSession()
+      unregister()
+    }
+  })
+
+  it.each(['source replaced', 'pane hidden'])('revokes a lazy read when its %s', async invalidation => {
+    const onSelect = vi.fn<(context: ImageLightboxActionContext) => void>()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Edit image', onSelect }
+    })
+
+    const read = vi.spyOn(globalThis, 'fetch')
+    const image = (src: string) => <ZoomableImage alt="selected image" src={src} transcriptActions />
+
+    try {
+      const { container, rerender } = await renderWithI18n(image(DATA_IMAGE))
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Edit image' }))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
+
+      if (invalidation === 'pane hidden') {
+        container.setAttribute('data-pane-hidden', '')
+      } else {
+        rerender(
+          <I18nProvider configClient={null} initialLocale="en">
+            {image(THUMB)}
+          </I18nProvider>
+        )
+      }
+
+      await expect(onSelect.mock.calls[0]![0].readImage()).resolves.toBeNull()
+      expect(read).not.toHaveBeenCalled()
+    } finally {
+      unregister()
+      read.mockRestore()
+    }
+  })
+
+  it('does not dispatch to an identical image in a new session on the same pane', async () => {
+    const onSelect = vi.fn()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Edit image', onSelect }
+    })
+
+    const session = atom('original-session')
+    const leaveSession = registerTranscriptLightboxScope('source', [session])
+
+    try {
+      await renderWithI18n(
+        <ComposerSurfaceProvider value="source">
+          <div data-chat-surface="">
+            <div data-message-id="same-id">
+              <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />
+            </div>
+          </div>
+        </ComposerSurfaceProvider>
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Edit image' }))
+      act(() => session.set('replacement-session'))
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(onSelect).not.toHaveBeenCalled()
+    } finally {
+      leaveSession()
+      unregister()
+    }
+  })
+
+  it('does not close a split-pane lightbox when the primary session changes', async () => {
+    const onSelect = vi.fn()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Use tile image', onSelect }
+    })
+
+    const original = $activeSessionId.get()
+    const leavePrimary = registerTranscriptLightboxScope('primary', [$activeSessionId])
+    const leaveTile = registerTranscriptLightboxScope('tile')
+
+    try {
+      await renderWithI18n(
+        <>
+          <ComposerSurfaceProvider value="primary">
+            <div data-chat-surface="">
+              <ZoomableImage alt="primary image" src={DATA_IMAGE} transcriptActions />
+            </div>
+          </ComposerSurfaceProvider>
+          <ComposerSurfaceProvider value="tile">
+            <div data-chat-surface="">
+              <ZoomableImage alt="tile image" src={DATA_IMAGE} transcriptActions />
+            </div>
+          </ComposerSurfaceProvider>
+        </>
+      )
+      fireEvent.click(screen.getByAltText('tile image'))
+      act(() => $activeSessionId.set('another-primary-session'))
+      fireEvent.click(screen.getByRole('button', { name: 'Use tile image' }))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
+    } finally {
+      leavePrimary()
+      leaveTile()
+      $activeSessionId.set(original)
+      unregister()
+    }
+  })
+
+  it('cancels an accepted action if its exact draft is replaced before focus teardown', async () => {
+    const registerDraft = () =>
+      registerComposerImageRecipient({
+        attach: vi.fn(async () => true),
+        capture: () => () => true,
+        sessionKey: 'original-draft',
+        surfaceId: 'source',
+        target: 'main'
+      })
+
+    const removeDraft = registerDraft()
+    let removeReplacement: (() => void) | undefined
+    const onSelect = vi.fn()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test',
+      data: { label: 'Edit image', onSelect }
+    })
+
+    try {
+      await renderWithI18n(
+        <ComposerSurfaceProvider value="source">
+          <div data-composer-surface-id="source" data-composer-target="main">
+            <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />
+          </div>
+        </ComposerSurfaceProvider>
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Edit image' }))
+      removeDraft()
+      removeReplacement = registerDraft()
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(onSelect).not.toHaveBeenCalled()
+    } finally {
+      removeDraft()
+      removeReplacement?.()
+      unregister()
     }
   })
 

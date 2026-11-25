@@ -142,6 +142,7 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
             className="absolute inset-0 block size-full cursor-zoom-in"
             onClick={lightbox.openFrom}
             type="button"
+            {...lightbox.triggerProps}
           >
             <img
               alt="Generated image"

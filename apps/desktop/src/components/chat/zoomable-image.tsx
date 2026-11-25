@@ -1,15 +1,17 @@
 'use client'
 
 import { useStore } from '@nanostores/react'
-import { type ComponentProps, type MouseEvent, useEffect, useId, useLayoutEffect, useRef } from 'react'
+import { type ComponentProps, type MouseEvent, useCallback, useEffect, useId, useLayoutEffect, useRef } from 'react'
 
-import { composerDraftCaptureForSurface } from '@/app/chat/composer/plugin-image-attachment'
+import { composerDraftCaptureForSurface, composerDraftIsCurrent } from '@/app/chat/composer/plugin-image-attachment'
 import { useComposerSurfaceId } from '@/app/chat/composer/scope'
 import { isElementInHiddenPane, usePaneVisible } from '@/components/pane-shell/pane-visibility'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { useZoomPan } from '@/components/ui/use-zoom-pan'
 import { useContributions } from '@/contrib/react/use-contributions'
+import { registry } from '@/contrib/registry'
+import type { Contribution } from '@/contrib/types'
 import { useImageDownload } from '@/hooks/use-image-download'
 import { useI18n } from '@/i18n'
 import { Download, ZoomIn, ZoomOut } from '@/lib/icons'
@@ -22,10 +24,15 @@ import {
 import { cn } from '@/lib/utils'
 import {
   $transcriptLightbox,
+  acceptTranscriptLightboxAction,
+  captureTranscriptImageSource,
   closeTranscriptLightbox,
+  finishTranscriptLightboxAction,
   openTranscriptLightbox,
+  registerTranscriptImageTrigger,
   releaseTranscriptLightbox,
-  type TranscriptLightboxSelection
+  type TranscriptLightboxSelection,
+  waitForTranscriptImageOpener
 } from '@/store/transcript-lightbox'
 
 export interface ZoomableImageProps extends ComponentProps<'img'> {
@@ -55,6 +62,23 @@ export function useImageLightbox(src: string, alt: string | undefined, transcrip
   const surfaceId = useComposerSurfaceId()
   const visible = usePaneVisible()
   const selection = useStore($transcriptLightbox)
+  const trigger = useRef<HTMLButtonElement | null>(null)
+
+  const ref = useCallback(
+    (node: HTMLButtonElement | null) => {
+      if (node && transcriptActions) {
+        trigger.current = node
+        const unregister = registerTranscriptImageTrigger(node, src)
+
+        return () => {
+          trigger.current = null
+          unregister()
+        }
+      }
+    },
+    [src, transcriptActions]
+  )
+
   const matches = visible && selection?.surfaceId === surfaceId && selection.src === src && selection.alt === alt
 
   useLayoutEffect(() => {
@@ -66,9 +90,8 @@ export function useImageLightbox(src: string, alt: string | undefined, transcrip
       closeTranscriptLightbox(imageId)
     }
 
-    // Streaming may replace a leaf. Reclaim its preview, but don't mint a
-    // plugin capability without a new click on the actual source occurrence.
-    if (matches && selection.imageId === null) {
+    // An addressed preview can only be reclaimed by that exact occurrence.
+    if (matches && selection.imageId === null && (!selection.source || selection.source.opener() === trigger.current)) {
       openTranscriptLightbox({ ...selection, imageId })
     }
   }, [imageId, matches, selection])
@@ -79,17 +102,25 @@ export function useImageLightbox(src: string, alt: string | undefined, transcrip
 
   return {
     open,
-    openFrom: (event: MouseEvent<HTMLButtonElement>) =>
+    openFrom: (event: MouseEvent<HTMLButtonElement>) => {
+      const source = transcriptActions ? captureTranscriptImageSource(event.currentTarget, src, surfaceId) : undefined
+
+      if (transcriptActions && !source) {
+        return
+      }
+
       openTranscriptLightbox({
         alt,
-        captureDraft: transcriptActions ? composerDraftCaptureForSurface(surfaceId) : undefined,
+        captureDraft: source ? composerDraftCaptureForSurface(surfaceId) : undefined,
         imageId,
-        opener: event.currentTarget,
+        source,
         src,
         surfaceId
-      }),
+      })
+    },
     close: () => closeTranscriptLightbox(imageId),
-    selection: open && selection.captureDraft ? selection : undefined
+    selection: open && transcriptActions && selection.source ? selection : undefined,
+    triggerProps: { 'data-transcript-image-trigger': transcriptActions ? '' : undefined, ref }
   }
 }
 
@@ -128,6 +159,7 @@ export function ZoomableImage({
           disabled={!canOpen}
           onClick={lightbox.openFrom}
           type="button"
+          {...lightbox.triggerProps}
         >
           <img alt={alt ?? ''} className={className} src={src} {...props} />
         </button>
@@ -170,16 +202,7 @@ export function ImageLightbox({
   selection?: TranscriptLightboxSelection
   src: string
 }) {
-  const openerRef = useRef<HTMLElement | null>(null)
-  const pendingAction = useRef<(() => void) | null>(null)
-  const currentSrc = useRef<string | null>(null)
-  useLayoutEffect(() => {
-    currentSrc.current = src
-
-    return () => {
-      currentSrc.current = null
-    }
-  }, [src])
+  const focusScope = useRef<{ dialog: EventTarget | null; opener: () => HTMLElement | null | undefined } | null>(null)
 
   // Shared pan/zoom mechanics (wheel zoom, drag pan, pinch) come from
   // useZoomPan — the same hook the diagram/artifact viewer uses, so there is a
@@ -205,35 +228,50 @@ export function ImageLightbox({
 
   const cursor = scale > 1 ? (panning ? 'grabbing' : 'grab') : 'zoom-out'
 
-  const selectAction = (action: ImageLightboxActionContribution['onSelect'], id: string) => {
-    const opener = selection?.opener
-    const isCurrent = () => currentSrc.current === src && opener?.isConnected && !isElementInHiddenPane(opener)
+  const selectAction = (entry: Contribution, action: ImageLightboxActionContribution['onSelect']) => {
+    const dialog = focusScope.current?.dialog
+    const source = selection?.source
+    const isRegistered = () => registry.getArea(IMAGE_LIGHTBOX_ACTIONS_AREA).includes(entry)
 
-    if (pendingAction.current || $transcriptLightbox.get() !== selection || !isCurrent()) {
+    if (!dialog || !source || $transcriptLightbox.get() !== selection || !isRegistered() || !source.opener()) {
       return
     }
 
-    const draft = selection?.captureDraft?.() ?? null
+    const draft = selection.captureDraft?.() ?? null
+    const isAllowed = () => isRegistered() && (!draft || composerDraftIsCurrent(draft))
+    const isCurrent = () => isAllowed() && Boolean(source.opener())
 
-    pendingAction.current = () => {
+    acceptTranscriptLightboxAction(selection, dialog, isLatestGesture => {
       let image: Promise<Blob | null> | undefined
 
       const readImage = async () => {
-        if (!isCurrent()) {
+        if (!(await waitForTranscriptImageOpener(source, isAllowed)) || !isCurrent()) {
           return null
         }
 
         const blob = await (image ??= readLightboxImage(src))
 
-        return isCurrent() ? blob : null
+        return (await waitForTranscriptImageOpener(source, isAllowed)) && isCurrent() ? blob : null
       }
 
+      const focusAfterClose = globalThis.document.activeElement
+      // Radix removes the old focus scope after the close event returns.
       void Promise.resolve()
-        .then(() => isCurrent() && action({ alt: alt ?? '', draft, readImage }))
-        .catch(() => console.warn(`[${IMAGE_LIGHTBOX_ACTIONS_AREA}] ${id} onSelect() failed`))
-    }
+        .then(async () => {
+          const mayRestoreFocus = () => isLatestGesture() && globalThis.document.activeElement === focusAfterClose
+          const mayDispatch = () => mayRestoreFocus() && isAllowed()
+          const opener = source.opener() ?? (await waitForTranscriptImageOpener(source, mayDispatch))
 
-    onOpenChange(false)
+          if (opener && mayRestoreFocus() && source.opener() === opener) {
+            opener.focus({ preventScroll: true })
+
+            if (isLatestGesture() && isAllowed() && source.opener() === opener) {
+              await action({ alt: alt ?? '', draft, readImage })
+            }
+          }
+        })
+        .catch(() => console.warn(`[${IMAGE_LIGHTBOX_ACTIONS_AREA}] ${entry.id} onSelect() failed`))
+    })
   }
 
   return (
@@ -292,21 +330,24 @@ export function ImageLightbox({
         // the real opener instead of letting Radix's missing trigger lose focus.
         onCloseAutoFocus={event => {
           event.preventDefault()
-          const opener = openerRef.current
 
-          if (opener?.isConnected) {
-            opener.focus({ preventScroll: true })
+          if (finishTranscriptLightboxAction(event.target)) {
+            return
           }
 
-          // Radix has removed the content; let its focus-scope teardown finish
-          // before a plugin opens another modal.
-          const action = pendingAction.current
-          pendingAction.current = null
-          action?.()
+          const scope = focusScope.current
+          const opener = scope && scope.dialog === event.target ? scope.opener() : null
+
+          if (opener?.isConnected && !isElementInHiddenPane(opener)) {
+            opener.focus({ preventScroll: true })
+          }
         }}
-        onOpenAutoFocus={() => {
+        onOpenAutoFocus={event => {
           const opener = globalThis.document.activeElement
-          openerRef.current = opener instanceof HTMLElement ? opener : null
+          focusScope.current = {
+            dialog: event.target,
+            opener: selection?.source?.opener ?? (() => (opener instanceof HTMLElement ? opener : null))
+          }
         }}
         overlayClassName="bg-black/60"
         showCloseButton={false}
@@ -339,11 +380,12 @@ export function ImageLightbox({
 function LightboxActions({
   onSelect
 }: {
-  onSelect: (action: ImageLightboxActionContribution['onSelect'], id: string) => void
+  onSelect: (entry: Contribution, action: ImageLightboxActionContribution['onSelect']) => void
 }) {
   const contributions = useContributions(IMAGE_LIGHTBOX_ACTIONS_AREA)
 
-  return contributions.map(({ data, id }) => {
+  return contributions.map(entry => {
+    const { data, id } = entry
     const action = data as ImageLightboxActionContribution | undefined
 
     if (typeof action?.label !== 'string' || !action.label.trim() || typeof action.onSelect !== 'function') {
@@ -354,7 +396,7 @@ function LightboxActions({
       <Button
         className="max-w-48 rounded-full"
         key={id}
-        onClick={() => onSelect(action.onSelect, id)}
+        onClick={() => onSelect(entry, action.onSelect)}
         size="sm"
         type="button"
         variant="ghost"

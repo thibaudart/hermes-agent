@@ -1135,7 +1135,7 @@ Register an `ImageLightboxActionContribution` in `IMAGE_LIGHTBOX_ACTIONS_AREA`
 to add a labeled button next to the zoom controls for a viewed chat image:
 
 ```javascript
-import { IMAGE_LIGHTBOX_ACTIONS_AREA } from '@hermes/plugin-sdk'
+import { host, IMAGE_LIGHTBOX_ACTIONS_AREA } from '@hermes/plugin-sdk'
 
 ctx.register({
   id: 'edit-image',
@@ -1144,20 +1144,30 @@ ctx.register({
     label: 'Edit image',
     async onSelect({ alt, draft, readImage }) {
       const image = await readImage()
-      if (image) openMyEditor({ alt, draft, image })
+      if (!image) {
+        host.notify({ kind: 'warning', message: 'The selected image is no longer available to edit.' })
+        return
+      }
+      openMyEditor({ alt, draft, image })
     }
   }
 })
 ```
 
 - `onSelect` runs only after the user activates the button and the native
-  viewer has closed and released focus. The plugin owns any editor or dialog
-  that opens next.
+  viewer has closed and released focus. If the contribution or originating
+  image context is no longer current, the host cancels the handoff. The plugin
+  owns any editor or dialog that opens next.
 - `readImage()` takes no arguments and reads only that selected image at the
   viewer's resolution. Call it in `onSelect` and keep the returned `Blob` if
-  needed. Only resolved `data:image/…` and live `blob:` sources are eligible;
-  there is no raw URL, external refetch, or file-read capability. It returns
-  `null` if the image is stale, unreadable, non-image, or over 16 MiB.
+  needed. Only renderer-local `data:image/…` and live `blob:` sources are
+  eligible. Remote media that the renderer has already materialized in one
+  of those forms can qualify; direct remote URLs cannot. This API exposes no
+  raw URL, external refetch, or file-read capability. A stale, missing,
+  unreadable, or ineligible source returns `null`. The host checks the declared
+  `image/*` MIME type and a 16 MiB byte limit; it does not decode the image or
+  certify the format or dimensions. Decode defensively and handle failures
+  even when `readImage()` returns a `Blob`.
 - `alt` is the image's alt text (or `''`). Treat it and the image bytes as
   untrusted content.
 - `draft` is the opaque `ComposerDraftAddress` for the originating chat

@@ -2,7 +2,7 @@ import { type AppendMessage, AssistantRuntimeProvider, type ThreadMessage } from
 import { useStore } from '@nanostores/react'
 import type { ReadableAtom } from 'nanostores'
 import type * as React from 'react'
-import { memo, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router'
 
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
@@ -52,6 +52,7 @@ import {
 } from '@/store/session'
 import { $focusedStoredSessionId } from '@/store/session-focus'
 import { $sessionStates, sessionTileDelegate } from '@/store/session-states'
+import { registerTranscriptLightboxScope } from '@/store/transcript-lightbox'
 import { $transcriptTailBySessionId, transcriptTailState } from '@/store/transcript-tail'
 import { isAuxiliaryWindow, isMainWindow } from '@/store/windows'
 
@@ -713,6 +714,27 @@ const ChatViewContent = memo(function ChatViewContent({
   })
 
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
+  const paneVisible = usePaneVisible()
+  const lightboxFreshDraftKey = isPrimary && !queueSessionKey ? freshDraftKey : null
+  useLayoutEffect(() => {
+    if (!composerSurfaceId || !paneVisible || routeSessionMismatch) {
+      return undefined
+    }
+
+    return registerTranscriptLightboxScope(composerSurfaceId, [view.$runtimeId, view.$storedId])
+  }, [
+    activeSessionId,
+    composerScope.connectionId,
+    composerScope.profile,
+    composerSurfaceId,
+    lightboxFreshDraftKey,
+    paneVisible,
+    queueSessionKey,
+    routeSessionMismatch,
+    routedSessionId,
+    selectedSessionId,
+    view
+  ])
 
   const chatBarState = useChatBarState({
     activeGatewayProfile,

@@ -20,6 +20,13 @@ interface ImageRecipient {
 const recipients = new Map<string, ImageRecipient>()
 const addresses = new WeakMap<ComposerDraftAddress, { recipient: ImageRecipient; isCurrent: () => boolean }>()
 
+/** The same exact-recipient guard used by the attachment write. */
+export function composerDraftIsCurrent(address: ComposerDraftAddress): boolean {
+  const entry = addresses.get(address)
+
+  return Boolean(entry && recipientIsVisible(entry.recipient) && entry.isCurrent())
+}
+
 export function registerComposerImageRecipient(recipient: ImageRecipient): () => void {
   recipients.set(recipient.surfaceId, recipient)
 
@@ -123,7 +130,7 @@ export async function attachImageToComposerDraft(
 
   const { recipient } = entry
 
-  const isCurrent = () => recipientIsVisible(recipient) && entry.isCurrent()
+  const isCurrent = () => composerDraftIsCurrent(address)
 
   if (!isCurrent()) {
     return false
