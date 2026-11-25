@@ -61,7 +61,11 @@ async function sessionFileOrigin(storedSessionId: null | string, runtimeId: null
   }
 }
 
-export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({ aspectRatio, result }) => {
+export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown; toolCallId?: string }> = ({
+  aspectRatio,
+  result,
+  toolCallId
+}) => {
   const { t } = useI18n()
   const copy = t.desktop
   const image = result === undefined ? null : generatedImageFromResult(result)
@@ -73,7 +77,7 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
 
   const { src, loaded, failed } = media
   const [canvasGone, setCanvasGone] = useState<string | null>(null)
-  const lightbox = useImageLightbox(src, 'Generated image', true)
+  const lightbox = useImageLightbox(src, 'Generated image', true, toolCallId ? `generated:${toolCallId}` : undefined)
   const { download, saving } = useImageDownload(src)
   const view = useSessionView()
   const storedSessionId = useStore(view.$storedId)

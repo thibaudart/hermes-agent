@@ -348,13 +348,24 @@ function safeDirectiveSegments(text: string): Unstable_DirectiveSegment[] {
  * Renders text containing Hermes directives (`@file:...`, `@image:...`) as
  * inline chips. Embedded MEDIA images render below as a thumbnail row.
  */
-export function DirectiveContent({ text, transcriptActions }: { text: string; transcriptActions?: boolean }) {
+export function DirectiveContent({
+  text,
+  transcriptActions,
+  transcriptSegmentKey
+}: {
+  text: string
+  transcriptActions?: boolean
+  /** Identifies the original text segment of a sent message, not its thumbnail row. */
+  transcriptSegmentKey?: string
+}) {
   const { cleanedText, images } = useMemo(() => safeEmbeddedImages(text ?? ''), [text])
   const segments = useMemo(() => safeDirectiveSegments(cleanedText), [cleanedText])
 
   // `@image:<path>` directives render as a block-level thumbnail row (like
   // embedded base64 images below), not inline mid-text — otherwise a large
   // thumbnail gets wedged between words and breaks the text's line flow.
+  // The parsed source indexes include unresolved images; render state never
+  // changes the occurrence key.
   const imageSegments = useMemo(
     () =>
       segments.filter(
@@ -385,6 +396,7 @@ export function DirectiveContent({ text, transcriptActions }: { text: string; tr
               key={`img-ref-${index}-${segment.id}`}
               label={segment.label}
               transcriptActions={transcriptActions}
+              transcriptOccurrenceKey={transcriptSegmentKey && `${transcriptSegmentKey}:ref:${index}`}
             />
           ))}
           {images.map((src, index) => (
@@ -396,6 +408,7 @@ export function DirectiveContent({ text, transcriptActions }: { text: string; tr
               slot="aui_embedded-image"
               src={src}
               transcriptActions={transcriptActions}
+              transcriptOccurrenceKey={transcriptSegmentKey && `${transcriptSegmentKey}:embedded:${index}`}
             />
           ))}
         </span>
@@ -412,7 +425,12 @@ export const DirectiveText: TextMessagePartComponent = ({ text }: TextMessagePar
 /** Image refs render as a thumbnail rather than a chip — matches how persisted
  * messages render after the backend embeds the data URL, so the UX is stable
  * across initial send and refresh. */
-const DirectiveImage: FC<{ id: string; label: string; transcriptActions?: boolean }> = ({ id, label, transcriptActions }) => {
+const DirectiveImage: FC<{ id: string; label: string; transcriptActions?: boolean; transcriptOccurrenceKey?: string }> = ({
+  id,
+  label,
+  transcriptActions,
+  transcriptOccurrenceKey
+}) => {
   // `blob:` joins the direct-URL set: the object URL is already renderer-local
   // (the whole point of the OS-drop preview path), so painting it is free of
   // the IPC read the path branch would issue.
@@ -487,6 +505,7 @@ const DirectiveImage: FC<{ id: string; label: string; transcriptActions?: boolea
       slot="aui_directive-image"
       src={src}
       transcriptActions={transcriptActions}
+      transcriptOccurrenceKey={transcriptOccurrenceKey}
       zoomSrc={zoomSrc ?? undefined}
     />
   )

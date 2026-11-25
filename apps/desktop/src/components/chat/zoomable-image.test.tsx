@@ -9,7 +9,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { registerFloatingComposer } from '@/app/chat/composer/floating-target'
 import { attachImageToComposerDraft, registerComposerImageRecipient } from '@/app/chat/composer/plugin-image-attachment'
 import { ComposerSurfaceProvider } from '@/app/chat/composer/scope'
+import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { UserMessageText } from '@/components/assistant-ui/thread/user-message-text'
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { registry } from '@/contrib/registry'
 import { I18nProvider } from '@/i18n/context'
 import {
@@ -224,6 +226,178 @@ describe('ZoomableImage lightbox', () => {
     }
   })
 
+  it('does not give a remounting markdown image’s action to a preceding image that loaded later', async () => {
+    const leaveSession = registerTranscriptLightboxScope('source')
+    const onSelect = vi.fn(() => globalThis.document.activeElement)
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test:occurrence',
+      data: { label: 'Edit image', onSelect }
+    })
+
+    const firstPath = '/tmp/lightbox-first-late.png'
+    const secondPath = '/tmp/lightbox-second-remount.png'
+    const first = Promise.withResolvers<string>()
+    const secondRemount = Promise.withResolvers<string>()
+    let blockSecond = false
+    vi.stubGlobal('hermesDesktop', {
+      readFileDataUrl: vi.fn((path: string) =>
+        path === firstPath ? first.promise : blockSecond ? secondRemount.promise : Promise.resolve(DATA_IMAGE)
+      )
+    })
+
+    const ui = (key: string) => (
+      <I18nProvider configClient={null} initialLocale="en">
+        <ComposerSurfaceProvider value="source">
+          <div data-chat-surface="">
+            <div data-transcript-image-message-id="reply">
+              <MarkdownTextContent
+                isRunning={false}
+                key={key}
+                text={`![same image](${firstPath})\n\n![same image](${secondPath})`}
+                transcriptActions
+                transcriptPartKey="0"
+              />
+            </div>
+          </div>
+        </ComposerSurfaceProvider>
+      </I18nProvider>
+    )
+
+    try {
+      const { container, rerender } = render(ui('before'))
+      const trigger = await screen.findByRole('button', { name: 'Open image' })
+      expect(screen.getByText('Loading lightbox-first-late.png...')).toBeTruthy()
+      trigger.focus()
+      fireEvent.click(trigger)
+      await act(async () => first.resolve(DATA_IMAGE))
+      const inline = () => [...container.querySelectorAll('button[aria-label="Open image"]')]
+      await waitFor(() => expect(inline()).toHaveLength(2))
+      expect(inline()[1]).toBe(trigger)
+
+      blockSecond = true
+      rerender(ui('after'))
+      await waitFor(() => expect(inline()).toHaveLength(1))
+      expect(globalThis.document.querySelector('[role="dialog"][data-state="open"]')).toBeNull()
+      expect(onSelect).not.toHaveBeenCalled()
+
+      await act(async () => secondRemount.resolve(DATA_IMAGE))
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit image' }))
+      await waitFor(() => expect(onSelect).toHaveBeenCalledOnce())
+      expect(inline()[1]).not.toBe(trigger)
+      expect(onSelect.mock.results[0]?.value).toBe(inline()[1])
+    } finally {
+      leaveSession()
+      unregister()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('opens ordinary zoom even when the transcript has no valid plugin scope', async () => {
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test:missing-scope',
+      data: { label: 'Edit image', onSelect: vi.fn() }
+    })
+
+    try {
+      await renderWithI18n(
+        <ComposerSurfaceProvider value="missing">
+          <div data-chat-surface="">
+            <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />
+          </div>
+        </ComposerSurfaceProvider>
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Edit image' })).toBeNull()
+    } finally {
+      unregister()
+    }
+  })
+
+  it('does not hand off an action when another dialog takes focus before close autofocus', async () => {
+    const onSelect = vi.fn()
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test:newer-focus',
+      data: { label: 'Edit image', onSelect }
+    })
+
+    const ui = (open: boolean) => (
+      <I18nProvider configClient={null} initialLocale="en">
+        <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />
+        <Dialog open={open}>
+          <DialogContent>
+            <DialogTitle>Newer dialog</DialogTitle>
+            <input aria-label="Newer input" />
+          </DialogContent>
+        </Dialog>
+      </I18nProvider>
+    )
+
+    try {
+      const { rerender } = render(ui(false))
+      const trigger = screen.getByRole('button', { name: 'Open image' })
+      trigger.focus()
+      fireEvent.click(trigger)
+      fireEvent.click(screen.getByRole('button', { name: 'Edit image' }))
+
+      // Radix defers the old scope's close callback, but the new scope can
+      // already autofocus in this commit, before the deferred callback runs.
+      rerender(ui(true))
+      const input = screen.getByRole('textbox', { name: 'Newer input' })
+      expect(globalThis.document.activeElement).toBe(input)
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+      expect(onSelect).not.toHaveBeenCalled()
+      expect(globalThis.document.activeElement).toBe(input)
+    } finally {
+      cleanup()
+      unregister()
+    }
+  })
+
+  it('keeps ordinary zoom through an unaddressed remount without carrying the action capability', async () => {
+    const leaveSession = registerTranscriptLightboxScope('source')
+
+    const unregister = registry.register({
+      area: IMAGE_LIGHTBOX_ACTIONS_AREA,
+      id: 'test:unaddressed',
+      data: { label: 'Edit image', onSelect: vi.fn() }
+    })
+
+    const ui = (key: string) => (
+      <I18nProvider configClient={null} initialLocale="en">
+        <ComposerSurfaceProvider value="source">
+          <div data-chat-surface="">
+            <div data-transcript-image-message-id="reply">
+              <ZoomableImage alt="selected image" key={key} src={DATA_IMAGE} transcriptActions />
+            </div>
+          </div>
+        </ComposerSurfaceProvider>
+      </I18nProvider>
+    )
+
+    try {
+      const { rerender } = render(ui('original'))
+      fireEvent.click(screen.getByRole('button', { name: 'Open image' }))
+      expect(screen.getByRole('button', { name: 'Edit image' })).toBeTruthy()
+
+      rerender(ui('replacement'))
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).getByRole('img').getAttribute('src')).toBe(DATA_IMAGE)
+      expect(within(dialog).queryByRole('button', { name: 'Edit image' })).toBeNull()
+    } finally {
+      cleanup()
+      leaveSession()
+      unregister()
+    }
+  })
+
   it.each([false, true])('restores the selected occurrence before handoff (image re-resolves: %s)', async resolving => {
     const leaveSession = registerTranscriptLightboxScope('source')
 
@@ -243,9 +417,17 @@ describe('ZoomableImage lightbox', () => {
       <I18nProvider configClient={null} initialLocale="en">
         <ComposerSurfaceProvider value="source">
           <div data-chat-surface="" data-composer-surface-id="source">
-            <div data-message-id="reply">
-              <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />
-              {key && <ZoomableImage alt="selected image" key={key} src={DATA_IMAGE} transcriptActions />}
+            <div data-transcript-image-message-id="reply">
+              <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions transcriptOccurrenceKey="first" />
+              {key && (
+                <ZoomableImage
+                  alt="selected image"
+                  key={key}
+                  src={DATA_IMAGE}
+                  transcriptActions
+                  transcriptOccurrenceKey="second"
+                />
+              )}
             </div>
           </div>
         </ComposerSurfaceProvider>
@@ -334,8 +516,8 @@ describe('ZoomableImage lightbox', () => {
       await renderWithI18n(
         <ComposerSurfaceProvider value="source">
           <div data-chat-surface="">
-            <div data-message-id="same-id">
-              <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions />
+            <div data-transcript-image-message-id="same-id">
+              <ZoomableImage alt="selected image" src={DATA_IMAGE} transcriptActions transcriptOccurrenceKey="same-image" />
             </div>
           </div>
         </ComposerSurfaceProvider>

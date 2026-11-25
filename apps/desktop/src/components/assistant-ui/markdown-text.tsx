@@ -1,6 +1,6 @@
 'use client'
 
-import { TextMessagePartProvider, useMessagePartText } from '@assistant-ui/react'
+import { TextMessagePartProvider, useAui, useMessagePartText } from '@assistant-ui/react'
 import {
   type StreamdownTextComponents,
   StreamdownTextPrimitive,
@@ -22,7 +22,7 @@ import {
   useMemo,
   useState
 } from 'react'
-import { defaultRemarkPlugins } from 'streamdown'
+import { Block, type BlockProps, defaultRemarkPlugins, type ExtraProps } from 'streamdown'
 
 import { useSessionView } from '@/app/chat/session-view'
 import { ExpandableBlock } from '@/components/chat/expandable-block'
@@ -174,9 +174,11 @@ function OpenMediaButton({ kind, path }: { kind: 'audio' | 'video'; path: string
   )
 }
 
-function MediaAttachment({ path, transcriptActions }: { path: string; transcriptActions?: boolean }) {
+type TranscriptImageProps = { transcriptActions?: boolean; transcriptOccurrenceKey?: string }
+
+function MediaAttachment({ path, ...transcript }: { path: string } & TranscriptImageProps) {
   return mediaKind(path) === 'image' ? (
-    <MarkdownImage alt={mediaName(path)} src={path} transcriptActions={transcriptActions} />
+    <MarkdownImage alt={mediaName(path)} src={path} {...transcript} />
   ) : (
     <MediaPlaybackAttachment path={path} />
   )
@@ -310,9 +312,11 @@ function MarkdownLink({
   children,
   className,
   href,
+  node,
   transcriptActions,
   ...props
-}: ComponentProps<'a'> & { transcriptActions?: boolean }) {
+}: ComponentProps<'a'> & ExtraProps & Pick<TranscriptImageProps, 'transcriptActions'>) {
+  const transcriptOccurrenceKey = useMarkdownOccurrence(node)
   const mediaPath = mediaPathFromMarkdownHref(href)
 
   if (mediaPath) {
@@ -331,7 +335,11 @@ function MarkdownLink({
       isMarkdownDocumentPath(mediaPath) || mediaKind(mediaPath) === 'file' ? (
         <PreviewAttachment target={mediaPath} />
       ) : (
-        <MediaAttachment path={mediaPath} transcriptActions={transcriptActions} />
+        <MediaAttachment
+          path={mediaPath}
+          transcriptActions={transcriptActions}
+          transcriptOccurrenceKey={transcriptOccurrenceKey}
+        />
       )
 
     // The plugin that owns the tool which produced this file may draw it instead.
@@ -370,7 +378,11 @@ function MarkdownLink({
           {mediaKind(fileHref) === 'file' ? (
             <PreviewAttachment target={fileHref} />
           ) : (
-            <MediaAttachment path={fileHref} transcriptActions={transcriptActions} />
+            <MediaAttachment
+              path={fileHref}
+              transcriptActions={transcriptActions}
+              transcriptOccurrenceKey={transcriptOccurrenceKey}
+            />
           )}
         </ToolMediaSlot>
       )
@@ -426,9 +438,10 @@ function MarkdownLink({
 // This is split from the image path because that path is built on hooks: a
 // conditional return inside it would have to sit after every hook call, which
 // would still fire an image resolve for media we never render as an image.
-type MarkdownImageProps = ComponentProps<'img'> & { transcriptActions?: boolean }
+type MarkdownImageProps = ComponentProps<'img'> & TranscriptImageProps
 
-export function MarkdownImage(props: MarkdownImageProps) {
+export function MarkdownImage({ node, transcriptOccurrenceKey, ...props }: MarkdownImageProps & ExtraProps) {
+  const occurrence = useMarkdownOccurrence(node)
   const rawSrc = typeof props.src === 'string' ? props.src : ''
   const kind = rawSrc ? mediaKind(rawSrc) : 'file'
 
@@ -436,7 +449,7 @@ export function MarkdownImage(props: MarkdownImageProps) {
     return <MediaAttachment path={rawSrc} />
   }
 
-  return <MarkdownImageContent {...props} />
+  return <MarkdownImageContent {...props} transcriptOccurrenceKey={transcriptOccurrenceKey ?? occurrence} />
 }
 
 // A cold frame is ~4:3 because that is the envelope an image can occupy here
@@ -545,6 +558,7 @@ interface MarkdownTextSurfaceProps {
   /** Foreign history must not load images or mount live transcript directives. */
   previewOnly?: boolean
   transcriptActions?: boolean
+  transcriptPartKey?: string
   /** Re-render the direct text nodes of paragraph-level containers (p / li /
    *  td) — a transcript surface styles its own inline tokens (a Bot Mode room's
    *  routed @mentions) without owning the Markdown pipeline. Nested inline
@@ -615,6 +629,79 @@ function HugeTextFallback({ containerClassName, text }: { containerClassName?: s
 const MarkdownStreamingContext = createContext(false)
 
 const parseSettledMarkdownIntoBlocksCached = (markdown: string) => parseMarkdownIntoBlocksCached(markdown, false)
+
+const MarkdownAddresses = createContext<{ part: string; offsets: readonly number[] } | null>(null)
+const MarkdownBlockAddress = createContext<{ part: string; offset: number } | null>(null)
+
+function AddressedMarkdownBlock(props: BlockProps) {
+  const addresses = useContext(MarkdownAddresses)
+  const part = addresses?.part
+  const offset = addresses?.offsets[props.index]
+  const address = useMemo(() => (part !== undefined && offset !== undefined ? { part, offset } : null), [part, offset])
+
+  return (
+    <MarkdownBlockAddress value={address}>
+      <Block {...props} />
+    </MarkdownBlockAddress>
+  )
+}
+
+function useMarkdownOccurrence(node: ExtraProps['node']) {
+  const block = useContext(MarkdownBlockAddress)
+  const start = node?.position?.start.offset
+  const end = node?.position?.end.offset
+
+  // Streamdown parses each block separately. Use a span in the part, not a
+  // block ordinal or a count of the images that happen to have loaded.
+  if (block && start !== undefined && end !== undefined) {
+    return `md:${block.part}:${block.offset + start}:${block.offset + end}`
+  }
+}
+
+function PreparedMarkdownText({
+  isStreaming,
+  text,
+  transcriptPartKey,
+  ...props
+}: ComponentProps<typeof StreamdownTextPrimitive> & { isStreaming: boolean; text: string; transcriptPartKey?: string }) {
+  const parseBlocks = isStreaming ? parseMarkdownIntoBlocksCached : parseSettledMarkdownIntoBlocksCached
+  const prepared = useMemo(() => preprocessWithTailRepair(text), [text])
+
+  const addresses = useMemo(() => {
+    if (!transcriptPartKey) {
+      return null
+    }
+
+    const offsets: number[] = []
+    let offset = 0
+
+    for (const block of parseBlocks(prepared)) {
+      if (!prepared.startsWith(block, offset)) {
+        return null
+      }
+
+      offsets.push(offset)
+      offset += block.length
+    }
+
+    return offset === prepared.length ? { offsets, part: transcriptPartKey } : null
+  }, [parseBlocks, prepared, transcriptPartKey])
+
+  return (
+    <TextMessagePartProvider isRunning={isStreaming} text={prepared}>
+      <MarkdownAddresses value={addresses}>
+        <StreamdownTextPrimitive
+          {...props}
+          BlockComponent={transcriptPartKey ? AddressedMarkdownBlock : undefined}
+          // preprocessWithTailRepair already handled remend on the full text.
+          mode="streaming"
+          parseIncompleteMarkdown={false}
+          parseMarkdownIntoBlocksFn={parseBlocks}
+        />
+      </MarkdownAddresses>
+    </TextMessagePartProvider>
+  )
+}
 
 /**
  * Paragraph override. Almost always a plain `<p>` — but a paragraph that is
@@ -731,14 +818,11 @@ function MarkdownTextSurface({
   previewOnly,
   scratchpad,
   textDirection,
-  transcriptActions
+  transcriptActions,
+  transcriptPartKey
 }: MarkdownTextSurfaceProps) {
-  // The whole surface renders the DEFERRED part. StreamdownTextPrimitive runs
-  // `preprocess` (full-text regex passes + the remend boundary scan, O(N)) on
-  // its context part before its own `defer`, i.e. at urgent priority on every
-  // flush. Deferring the part here and republishing it below means the urgent
-  // render sees an unchanged part and bails out; all text work (preprocess,
-  // split, parse) runs only in the interruptible deferred render.
+  // Defer the whole part so the O(N) preprocessing and parsing below run in
+  // the interruptible render, not at urgent priority on every stream flush.
   const { status, text } = useDeferredValue(useMessagePartText())
   // List/quote boxes resolve from content under Auto (see the ul/ol/blockquote
   // notes below); an explicit choice replaces that vote rather than nesting it.
@@ -783,7 +867,9 @@ function MarkdownTextSurface({
           ),
         a: previewOnly
           ? PreviewOnlyMarkdownLink
-          : (props: ComponentProps<'a'>) => <MarkdownLink {...props} transcriptActions={transcriptActions && !scratchpad} />,
+          : (props: ComponentProps<'a'> & ExtraProps) => (
+              <MarkdownLink {...props} transcriptActions={transcriptActions && !scratchpad} />
+            ),
         // Inline code must not vote when an ancestor resolves `dir="auto"`
         // (HTML's algorithm skips descendants that carry their own dir),
         // mirroring the CSS isolate that already keeps it out of the
@@ -854,7 +940,9 @@ function MarkdownTextSurface({
         ),
         img: previewOnly
           ? ({ alt }: ComponentProps<'img'>) => <span>{alt}</span>
-          : (props: ComponentProps<'img'>) => <MarkdownImage {...props} transcriptActions={transcriptActions && !scratchpad} />,
+          : (props: ComponentProps<'img'> & ExtraProps) => (
+              <MarkdownImage {...props} transcriptActions={transcriptActions && !scratchpad} />
+            ),
         SyntaxHighlighter: (props: SyntaxHighlighterProps) => (
           <MarkdownCodeBlock
             {...props}
@@ -894,27 +982,17 @@ function MarkdownTextSurface({
       label="markdown-render"
     >
       <MarkdownStreamingContext value={isStreaming}>
-        <TextMessagePartProvider isRunning={isStreaming} text={text}>
-          <StreamdownTextPrimitive
-            components={components}
-            containerClassName={cn(MARKDOWN_CONTAINER_CLASS_NAME, containerClassName)}
-            containerProps={surfaceContainerProps}
-            lineNumbers={false}
-            mode="streaming"
-            // Incomplete-markdown repair runs in preprocessWithTailRepair on the
-            // full accumulated text; the built-in tail-bounded remend is disabled
-            // because a custom parseMarkdownIntoBlocksFn is supplied, and
-            // parseIncompleteMarkdown stays false to avoid a second full-text
-            // remend pass.
-            parseIncompleteMarkdown={false}
-            parseMarkdownIntoBlocksFn={
-              isStreaming ? parseMarkdownIntoBlocksCached : parseSettledMarkdownIntoBlocksCached
-            }
-            plugins={plugins}
-            preprocess={preprocessWithTailRepair}
-            remarkPlugins={REMARK_PLUGINS}
-          />
-        </TextMessagePartProvider>
+        <PreparedMarkdownText
+          components={components}
+          containerClassName={cn(MARKDOWN_CONTAINER_CLASS_NAME, containerClassName)}
+          containerProps={surfaceContainerProps}
+          isStreaming={isStreaming}
+          lineNumbers={false}
+          plugins={plugins}
+          remarkPlugins={REMARK_PLUGINS}
+          text={text}
+          transcriptPartKey={transcriptActions && !scratchpad && !previewOnly ? transcriptPartKey : undefined}
+        />
       </MarkdownStreamingContext>
     </ErrorBoundary>
   )
@@ -972,7 +1050,15 @@ export function MarkdownTextContent({ isRunning, text, ...surfaceProps }: Markdo
 const MarkdownTextImpl = () => {
   const textDirection = useForcedTextDirection()
 
-  return <MarkdownTextSurface textDirection={textDirection} transcriptActions />
+  const query = useAui().part.query
+
+  return (
+    <MarkdownTextSurface
+      textDirection={textDirection}
+      transcriptActions
+      transcriptPartKey={query?.type === 'index' ? String(query.index) : undefined}
+    />
+  )
 }
 
 export const MarkdownText = memo(MarkdownTextImpl)

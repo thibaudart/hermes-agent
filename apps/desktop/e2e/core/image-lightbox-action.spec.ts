@@ -56,7 +56,13 @@ test('a runtime plugin receives the selected transcript image after the lightbox
     await send(page, 'U1-imageaction')
     await expect(page.getByText('Image action reply')).toBeVisible()
     const transcript = page.locator('[data-slot="aui_thread-viewport"]')
-    await transcript.getByRole('button', { name: 'Open image', exact: true }).click()
+
+    const imageOpener = transcript
+      .locator('[data-transcript-image-message-id]')
+      .getByRole('button', { name: 'Open image', exact: true })
+
+    await expect(imageOpener).toHaveAttribute('data-transcript-image-trigger', /^md:/, { timeout: 5_000 })
+    await imageOpener.click()
     const lightbox = page.locator('[data-variant="media-lightbox"]')
     await lightbox.getByRole('button', { name: 'Use this image', exact: true }).click({ timeout: 10_000 })
     const modal = page.getByRole('dialog', { name: 'Image action test' })

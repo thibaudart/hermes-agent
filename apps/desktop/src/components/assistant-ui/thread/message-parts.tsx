@@ -48,7 +48,7 @@ const settledWithoutResult = ({ completedAt, result }: TimelineToolCallProps): b
   result === undefined && completedAt !== undefined
 
 const ImageGenerateTool: FC<TimelineToolCallProps> = props => {
-  const { args, completedAt, result, timestamp } = props
+  const { args, completedAt, result, timestamp, toolCallId } = props
   const aspectRatio = typeof args?.aspect_ratio === 'string' ? args.aspect_ratio : undefined
 
   // The image card owns successful generations. Failed or malformed results
@@ -61,7 +61,7 @@ const ImageGenerateTool: FC<TimelineToolCallProps> = props => {
   return (
     <div className="mt-1.5">
       <TimelineTimestamp className="mb-0.5 block" completedAt={completedAt} timestamp={timestamp} />
-      <GeneratedImage aspectRatio={aspectRatio} result={result} />
+      <GeneratedImage aspectRatio={aspectRatio} result={result} toolCallId={toolCallId} />
     </div>
   )
 }

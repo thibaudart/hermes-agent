@@ -42,6 +42,8 @@ export interface ZoomableImageProps extends ComponentProps<'img'> {
   slot?: string
   /** Only opt in from a chat transcript, never a private image viewer. */
   transcriptActions?: boolean
+  /** Stable within the transcript row, regardless of which other images have loaded. */
+  transcriptOccurrenceKey?: string
   /** Full-resolution source for the lightbox and download. When set, the inline
    * `<img>` keeps its bounded `src` (avoiding heavy inline paints) while the
    * zoom view and Save action use the original — so a click-to-zoom shows real
@@ -57,7 +59,12 @@ export interface ImageActionCopy {
   resetZoom: string
 }
 
-export function useImageLightbox(src: string, alt: string | undefined, transcriptActions = false) {
+export function useImageLightbox(
+  src: string,
+  alt: string | undefined,
+  transcriptActions = false,
+  occurrenceKey?: string
+) {
   const imageId = useId()
   const surfaceId = useComposerSurfaceId()
   const visible = usePaneVisible()
@@ -79,7 +86,12 @@ export function useImageLightbox(src: string, alt: string | undefined, transcrip
     [src, transcriptActions]
   )
 
-  const matches = visible && selection?.surfaceId === surfaceId && selection.src === src && selection.alt === alt
+  const matches =
+    visible &&
+    selection?.surfaceId === surfaceId &&
+    selection.src === src &&
+    selection.alt === alt &&
+    selection.occurrenceKey === occurrenceKey
 
   useLayoutEffect(() => {
     if (!selection || $transcriptLightbox.get() !== selection) {
@@ -103,16 +115,17 @@ export function useImageLightbox(src: string, alt: string | undefined, transcrip
   return {
     open,
     openFrom: (event: MouseEvent<HTMLButtonElement>) => {
-      const source = transcriptActions ? captureTranscriptImageSource(event.currentTarget, src, surfaceId) : undefined
+      const candidate = transcriptActions
+        ? captureTranscriptImageSource(event.currentTarget, src, surfaceId, occurrenceKey)
+        : undefined
 
-      if (transcriptActions && !source) {
-        return
-      }
+      const source = candidate?.opener() === event.currentTarget ? candidate : undefined
 
       openTranscriptLightbox({
         alt,
         captureDraft: source ? composerDraftCaptureForSurface(surfaceId) : undefined,
         imageId,
+        occurrenceKey,
         source,
         src,
         surfaceId
@@ -120,7 +133,7 @@ export function useImageLightbox(src: string, alt: string | undefined, transcrip
     },
     close: () => closeTranscriptLightbox(imageId),
     selection: open && transcriptActions && selection.source ? selection : undefined,
-    triggerProps: { 'data-transcript-image-trigger': transcriptActions ? '' : undefined, ref }
+    triggerProps: { 'data-transcript-image-trigger': transcriptActions ? occurrenceKey : undefined, ref }
   }
 }
 
@@ -133,6 +146,7 @@ export function ZoomableImage({
   alt,
   slot,
   transcriptActions,
+  transcriptOccurrenceKey,
   ...props
 }: ZoomableImageProps) {
   const { t } = useI18n()
@@ -141,7 +155,7 @@ export function ZoomableImage({
   // thumbnail (`src`) stays the cheap paint.
   const fullSrc = zoomSrc || src || ''
   const { download, saving } = useImageDownload(fullSrc)
-  const lightbox = useImageLightbox(fullSrc, alt, transcriptActions)
+  const lightbox = useImageLightbox(fullSrc, alt, transcriptActions, transcriptOccurrenceKey)
   const canOpen = Boolean(src)
 
   return (
@@ -229,11 +243,19 @@ export function ImageLightbox({
   const cursor = scale > 1 ? (panning ? 'grabbing' : 'grab') : 'zoom-out'
 
   const selectAction = (entry: Contribution, action: ImageLightboxActionContribution['onSelect']) => {
-    const dialog = focusScope.current?.dialog
+    const scope = focusScope.current
+    const dialog = scope?.dialog
     const source = selection?.source
     const isRegistered = () => registry.getArea(IMAGE_LIGHTBOX_ACTIONS_AREA).includes(entry)
 
-    if (!dialog || !source || $transcriptLightbox.get() !== selection || !isRegistered() || !source.opener()) {
+    if (
+      !scope ||
+      !(dialog instanceof HTMLElement) ||
+      !source ||
+      $transcriptLightbox.get() !== selection ||
+      !isRegistered() ||
+      !source.opener()
+    ) {
       return
     }
 
@@ -241,7 +263,25 @@ export function ImageLightbox({
     const isAllowed = () => isRegistered() && (!draft || composerDraftIsCurrent(draft))
     const isCurrent = () => isAllowed() && Boolean(source.opener())
 
-    acceptTranscriptLightboxAction(selection, dialog, isLatestGesture => {
+    // Focus can move before Radix's deferred close callback, or while the
+    // original image is remounting. Body focus alone is normal during teardown.
+    const doc = dialog.ownerDocument
+
+    const ownsFocus = (target: EventTarget | null) =>
+      target === doc.body || (target instanceof Node && dialog.contains(target))
+
+    let transferredFocus = !ownsFocus(doc.activeElement)
+
+    const onFocusIn = (event: FocusEvent) => {
+      transferredFocus ||= !ownsFocus(event.target)
+    }
+
+    doc.addEventListener('focusin', onFocusIn, true)
+    const stopWatchingFocus = () => doc.removeEventListener('focusin', onFocusIn, true)
+    // A superseded action must not fall back to ordinary opener restoration.
+    scope.opener = () => undefined
+
+    acceptTranscriptLightboxAction(selection, dialog, stopWatchingFocus, isLatestGesture => {
       let image: Promise<Blob | null> | undefined
 
       const readImage = async () => {
@@ -254,23 +294,24 @@ export function ImageLightbox({
         return (await waitForTranscriptImageOpener(source, isAllowed)) && isCurrent() ? blob : null
       }
 
-      const focusAfterClose = globalThis.document.activeElement
       // Radix removes the old focus scope after the close event returns.
       void Promise.resolve()
         .then(async () => {
-          const mayRestoreFocus = () => isLatestGesture() && globalThis.document.activeElement === focusAfterClose
+          const mayRestoreFocus = () => isLatestGesture() && !transferredFocus && ownsFocus(doc.activeElement)
           const mayDispatch = () => mayRestoreFocus() && isAllowed()
           const opener = source.opener() ?? (await waitForTranscriptImageOpener(source, mayDispatch))
 
           if (opener && mayRestoreFocus() && source.opener() === opener) {
+            stopWatchingFocus()
             opener.focus({ preventScroll: true })
 
-            if (isLatestGesture() && isAllowed() && source.opener() === opener) {
+            if (doc.activeElement === opener && isLatestGesture() && isAllowed() && source.opener() === opener) {
               await action({ alt: alt ?? '', draft, readImage })
             }
           }
         })
         .catch(() => console.warn(`[${IMAGE_LIGHTBOX_ACTIONS_AREA}] ${entry.id} onSelect() failed`))
+        .finally(stopWatchingFocus)
     })
   }
 

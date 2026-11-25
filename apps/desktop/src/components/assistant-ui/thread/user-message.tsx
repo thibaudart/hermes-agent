@@ -58,6 +58,7 @@ export function StickyHumanMessageContainer({
         data-message-id={messageId}
         data-role="user"
         data-slot="aui_user-message-root"
+        data-transcript-image-message-id={messageId}
       >
         {children}
       </div>
@@ -568,7 +569,7 @@ export const UserMessage: FC<{
     // empty above a detached row. Images keep their thumbnail row below.
     chipOnlyTurn && (
       <div className="flex min-h-[1.25rem] flex-wrap gap-1">
-        <DirectiveContent text={attachmentRefs.join(' ')} transcriptActions />
+        <DirectiveContent text={attachmentRefs.join(' ')} transcriptActions transcriptSegmentKey="user-attachments" />
       </div>
     )
   )
@@ -583,8 +584,8 @@ export const UserMessage: FC<{
           // where the sticky-prompt clip hides its top even at rest. Image refs
           // render as thumbnails, file refs as chips; no border.
           attachmentRefs.length > 0 && !chipOnlyTurn ? (
-            <div className="mb-2 flex flex-wrap gap-1">
-              <DirectiveContent text={attachmentRefs.join(' ')} transcriptActions />
+            <div className="mb-2 flex flex-wrap gap-1" data-transcript-image-message-id={messageId}>
+              <DirectiveContent text={attachmentRefs.join(' ')} transcriptActions transcriptSegmentKey="user-attachments" />
             </div>
           ) : null
         }

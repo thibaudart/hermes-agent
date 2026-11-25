@@ -8,48 +8,42 @@ export interface TranscriptLightboxSelection {
   alt?: string
   captureDraft?: () => ComposerDraftAddress | null
   imageId: string | null
+  occurrenceKey?: string
   source?: TranscriptImageSource
   src: string
   surfaceId: string | null
 }
 
 interface TranscriptImageSource {
-  /** Only occurrences with a message address can outlive their DOM node. */
+  /** Only renderer-addressed occurrences can outlive their DOM node. */
   remountable: boolean
   /** `null` means an addressed image is re-rendering; `undefined` means stale. */
   opener: () => HTMLButtonElement | null | undefined
 }
 
-const MESSAGE = '[data-message-id]'
+const MESSAGE = '[data-transcript-image-message-id]'
 const CHAT = '[data-chat-surface]'
-const TRIGGER = '[data-transcript-image-trigger]'
-const triggerSources = new WeakMap<HTMLButtonElement, string>()
+const triggerSources = new WeakMap<HTMLButtonElement, { src: string }>()
 const triggerWaiters = new Set<() => void>()
 const paneScopes = new Map<string, { generation: number; isCurrent: () => boolean }>()
 let unscopedEpoch = 0
 
 export function registerTranscriptImageTrigger(trigger: HTMLButtonElement, src: string): () => void {
-  triggerSources.set(trigger, src)
+  triggerSources.set(trigger, { src })
 
   if (triggerWaiters.size) {
-    // Resolve addresses after all the replacement leaves commit, not halfway
-    // through a message whose image order is still being rebuilt.
+    // Resolve addresses after all the replacement leaves commit.
     queueMicrotask(() => triggerWaiters.forEach(check => check()))
   }
 
   return () => triggerSources.delete(trigger)
 }
 
-function messageTriggers(message: Element) {
-  return [...message.querySelectorAll<HTMLButtonElement>(TRIGGER)].filter(
-    trigger => trigger.closest(MESSAGE) === message
-  )
-}
-
 export function captureTranscriptImageSource(
   trigger: HTMLButtonElement,
   src: string,
-  surfaceId: string | null
+  surfaceId: string | null,
+  occurrenceKey?: string
 ): TranscriptImageSource | undefined {
   const surface = trigger.closest(CHAT)
   const scope = surfaceId === null ? undefined : paneScopes.get(surfaceId)
@@ -59,9 +53,17 @@ export function captureTranscriptImageSource(
   }
 
   const message = trigger.closest<HTMLElement>(MESSAGE)
-  const messageId = message?.dataset.messageId
-  const occurrence = message && messageId && surface?.contains(message) ? messageTriggers(message).indexOf(trigger) : -1
-  const rowSelector = occurrence >= 0 && messageId ? `[data-message-id="${CSS.escape(messageId)}"]` : null
+  const messageId = message?.dataset.transcriptImageMessageId
+
+  const address =
+    occurrenceKey && messageId && surface?.contains(message)
+      ? {
+          row: `[data-transcript-image-message-id="${CSS.escape(messageId)}"]`,
+          trigger: `[data-transcript-image-trigger="${CSS.escape(occurrenceKey)}"]`
+        }
+      : null
+
+  const original = triggerSources.get(trigger)
   const generation = scope?.generation ?? unscopedEpoch
   let replaced = false
 
@@ -71,7 +73,7 @@ export function captureTranscriptImageSource(
       : paneScopes.get(surfaceId) === scope && (!scope || (scope.generation === generation && scope.isCurrent()))
 
   return {
-    remountable: rowSelector !== null,
+    remountable: address !== null,
     opener: () => {
       if (replaced || !scopeIsCurrent()) {
         return undefined
@@ -81,21 +83,38 @@ export function captureTranscriptImageSource(
         return undefined
       }
 
-      const row = rowSelector ? surface?.querySelector(rowSelector) : null
-      const originalInRow = row && trigger.isConnected && trigger.closest(MESSAGE) === row
-      const current = !rowSelector || originalInRow ? trigger : row && messageTriggers(row)[occurrence]
-      const currentSrc = current && triggerSources.get(current)
+      let current = trigger
 
-      if (rowSelector && (!current || currentSrc === undefined)) {
-        return null
+      if (address) {
+        // A user's sticky bubble and sent attachments are separate DOM roots.
+        const matches = surface?.querySelectorAll<HTMLButtonElement>(`${address.row} ${address.trigger}`)
+
+        const candidates = matches && [...matches].filter(
+          node => node.closest(MESSAGE)?.matches(address.row) && node.closest(CHAT) === surface && triggerSources.has(node)
+        )
+
+        if (!candidates?.length) {
+          return null
+        }
+
+        if (candidates.length !== 1) {
+          replaced = true
+
+          return undefined
+        }
+
+        current = candidates[0]!
       }
 
+      const registration = triggerSources.get(current)
+
       if (
-        current?.isConnected &&
+        current.isConnected &&
         !current.disabled &&
         current.closest(CHAT) === surface &&
         !isElementInHiddenPane(current) &&
-        currentSrc === src
+        registration?.src === src &&
+        (address || registration === original)
       ) {
         return current
       }
@@ -141,7 +160,7 @@ export function waitForTranscriptImageOpener(
 
 /** Keep the preview open when streaming replaces the selected leaf (#123018). */
 export const $transcriptLightbox = atom<TranscriptLightboxSelection | null>(null)
-let pendingAction: { dialog: EventTarget; finish: () => void } | undefined
+let pendingAction: { cancel: () => void; dialog: EventTarget; finish: () => void } | undefined
 let gestureVersion = 0
 
 // Only viewers outside a mounted ChatView lack a pane lifecycle. A change
@@ -189,6 +208,7 @@ export function registerTranscriptLightboxScope(
 export function openTranscriptLightbox(selection: TranscriptLightboxSelection): void {
   if (selection.src) {
     gestureVersion += 1
+    pendingAction?.cancel()
     pendingAction = undefined
     triggerWaiters.forEach(check => check())
     $transcriptLightbox.set(selection)
@@ -199,12 +219,15 @@ export function openTranscriptLightbox(selection: TranscriptLightboxSelection): 
 export function acceptTranscriptLightboxAction(
   selection: TranscriptLightboxSelection,
   dialog: EventTarget,
+  cancel: () => void,
   finish: (isLatestGesture: () => boolean) => void
 ): void {
   if (!pendingAction && $transcriptLightbox.get() === selection) {
     const accepted = gestureVersion
-    pendingAction = { dialog, finish: () => finish(() => accepted === gestureVersion) }
+    pendingAction = { cancel, dialog, finish: () => finish(() => accepted === gestureVersion) }
     $transcriptLightbox.set(null)
+  } else {
+    cancel()
   }
 }
 
@@ -244,6 +267,7 @@ export function releaseTranscriptLightbox(imageId: string): void {
 /** Mount/test isolation: drop any open entry without a gesture. */
 export function resetTranscriptLightbox(): void {
   gestureVersion += 1
+  pendingAction?.cancel()
   pendingAction = undefined
   triggerWaiters.forEach(check => check())
   $transcriptLightbox.set(null)
